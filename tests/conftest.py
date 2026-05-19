@@ -2,9 +2,23 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
+
+# Ensure Hermes is importable for the ABC subclass check in
+# test_provider_lifecycle.py. When Hermes Agent isn't pip-installed but is
+# checked out at ``~/.hermes/hermes-agent`` (the default location for
+# ``hermes setup`` clones), add it to sys.path. Done at module import
+# time so the ABC import in tests resolves; otherwise the test silently
+# skips on every dev machine. In CI, the directory doesn't exist and the
+# test correctly skips.
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+_HERMES_AGENT = _HERMES_HOME / "hermes-agent"
+if _HERMES_AGENT.is_dir() and str(_HERMES_AGENT) not in sys.path:
+    sys.path.insert(0, str(_HERMES_AGENT))
 
 
 @pytest.fixture(autouse=True)

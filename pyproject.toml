@@ -64,7 +64,11 @@ include-package-data = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# importlib mode bypasses sys.path/__init__.py heuristics so the
+# plugin-discovery shim at the repo root (__init__.py, cli.py) isn't
+# imported as a test module. Without this, pytest's default "prepend"
+# mode walks rootdir and chokes on the relative imports in those shims.
+addopts = "-ra --strict-markers --import-mode=importlib"
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
