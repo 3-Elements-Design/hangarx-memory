@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 from urllib import error as urllib_error
+from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 
@@ -187,6 +188,97 @@ class CortexClient:
         }
         return self.request("POST", "/v1/memory/auto-promote", _compact(body))
 
+    # -- Introspection -------------------------------------------------------
+
+    def memory_stats(self, **kwargs: Any) -> Any:
+        """Return high-level counts: total items, categories, by priority.
+
+        Wraps ``GET /v1/memory/stats``. Returns a dict shaped like::
+
+            {
+                "totalItems": int,
+                "totalCategories": int,
+                "itemsByPriority": {"high": int, "normal": int, ...},
+                "categories": [...]
+            }
+        """
+        params = _compact({
+            "workspaceId": kwargs.get("workspace_id") or self.workspace_id or None,
+            "agentId": kwargs.get("agent_id") or None,
+        })
+        return self.request(
+            "GET", "/v1/memory/stats" + _querystring(params)
+        )
+
+    def memory_categories(self, **kwargs: Any) -> Any:
+        """List memory categories with counts.
+
+        Wraps ``GET /v1/memory/categories``. Cortex groups memories into
+        named categories (user_fact, agent_instruction, ...) — this
+        endpoint returns the list with item counts per category so the
+        agent can answer "what kinds of things do you remember?".
+        """
+        params = _compact({
+            "workspaceId": kwargs.get("workspace_id") or self.workspace_id or None,
+            "agentId": kwargs.get("agent_id") or None,
+        })
+        return self.request(
+            "GET", "/v1/memory/categories" + _querystring(params)
+        )
+
+    def memory_items(self, **kwargs: Any) -> Any:
+        """List individual memory items.
+
+        Wraps ``GET /v1/memory/items``. Returns the raw stored facts so
+        the user can audit exactly what the agent has persisted about
+        them. The agent_id filter narrows to a single agent's memory
+        bank when the workspace is shared across agents.
+        """
+        params = _compact({
+            "workspaceId": kwargs.get("workspace_id") or self.workspace_id or None,
+            "agentId": kwargs.get("agent_id") or None,
+        })
+        return self.request(
+            "GET", "/v1/memory/items" + _querystring(params)
+        )
+
+    def memory_item(self, item_id: str, **kwargs: Any) -> Any:
+        """Get a single memory item by ID.
+
+        Wraps ``GET /v1/memory/items/:itemId``. Pass ``track_access=True``
+        to bump the item's access counter (used by Cortex's freshness +
+        trust scoring).
+        """
+        if not item_id:
+            raise CortexError("memory_item requires a non-empty item_id")
+        params = _compact({
+            "workspaceId": kwargs.get("workspace_id") or self.workspace_id or None,
+            "agentId": kwargs.get("agent_id") or None,
+            "trackAccess": "true" if kwargs.get("track_access") else None,
+        })
+        return self.request(
+            "GET", f"/v1/memory/items/{item_id}" + _querystring(params)
+        )
+
+    def memory_category(self, category_id: str, **kwargs: Any) -> Any:
+        """Get a single memory category with optional file content.
+
+        Wraps ``GET /v1/memory/categories/:categoryId``. Pass
+        ``include_content=True`` to also fetch the raw markdown file
+        backing the category (Cortex stores categories as files in a
+        per-agent directory).
+        """
+        if not category_id:
+            raise CortexError("memory_category requires a non-empty category_id")
+        params = _compact({
+            "workspaceId": kwargs.get("workspace_id") or self.workspace_id or None,
+            "agentId": kwargs.get("agent_id") or None,
+            "includeContent": "true" if kwargs.get("include_content") else None,
+        })
+        return self.request(
+            "GET", f"/v1/memory/categories/{category_id}" + _querystring(params)
+        )
+
     def feedback(self, memory_id: str, helpful: bool, **kwargs: Any) -> Any:
         """Rate a memory/result as helpful or not.
 
@@ -360,3 +452,18 @@ class CortexClient:
 def _compact(data: Dict[str, Any]) -> Dict[str, Any]:
     """Drop keys whose values are None, preserving false/zero values."""
     return {key: value for key, value in data.items() if value is not None}
+
+
+def _querystring(params: Dict[str, Any]) -> str:
+    """Encode params as ``?key=value&...`` or return empty string.
+
+    Uses urllib.parse.urlencode under the hood so values are properly
+    percent-encoded. Keys with empty-string values are dropped (Cortex's
+    z.string().optional() validators treat them the same as missing).
+    """
+    if not params:
+        return ""
+    filtered = {k: str(v) for k, v in params.items() if v not in (None, "")}
+    if not filtered:
+        return ""
+    return "?" + urllib_parse.urlencode(filtered)

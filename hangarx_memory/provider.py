@@ -824,7 +824,11 @@ class HangarxMemoryProvider(MemoryProvider):
                 keep = {"cortex_recall", "cortex_remember", "cortex_ask"}
                 cortex_schemas = [s for s in cortex_schemas if s["name"] in keep]
             else:
-                cortex_schemas = cortex_schemas + self._cortex_dedup_tool_schemas()
+                cortex_schemas = (
+                    cortex_schemas
+                    + self._cortex_dedup_tool_schemas()
+                    + self._cortex_introspection_tool_schemas()
+                )
             schemas.extend(cortex_schemas)
         if self._vault:
             vault_schemas = self._vault_tool_schemas()
@@ -916,6 +920,95 @@ class HangarxMemoryProvider(MemoryProvider):
                         "uri": {"type": "string"},
                     },
                     "required": ["uri"],
+                },
+            },
+        ]
+
+    def _cortex_introspection_tool_schemas(self) -> List[Dict[str, Any]]:
+        """Tools that let the user audit what the agent remembers about them.
+
+        These wrap the unauthenticated-friendly read paths of Cortex's
+        agent-memory module (``GET /v1/memory/stats``, ``categories``,
+        ``items``) plus an ``about_me`` synthesis tool that combines
+        them into a single human-readable summary.
+        """
+        return [
+            {
+                "name": "cortex_memory_stats",
+                "description": (
+                    "Return high-level memory metrics: total items, total "
+                    "categories, items by priority. Use when the user asks "
+                    "\"how much do you remember about me?\" or to gauge "
+                    "memory health before reflection."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": (
+                                "Narrow to a single agent's memory bank. "
+                                "Omit for workspace-wide stats."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
+                "name": "cortex_memory_categories",
+                "description": (
+                    "List memory categories (user_fact, agent_instruction, "
+                    "preference, etc.) with item counts. Use when the user "
+                    "asks \"what kinds of things do you know about me?\"."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string"},
+                    },
+                },
+            },
+            {
+                "name": "cortex_memory_items",
+                "description": (
+                    "List individual stored memory items. Returns the raw "
+                    "facts the agent has persisted — use this when the user "
+                    "wants to audit what's actually been saved (\"show me "
+                    "the actual memories\"). Pair with cortex_forget if "
+                    "anything looks wrong."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string"},
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max items to return.",
+                            "default": 50,
+                        },
+                    },
+                },
+            },
+            {
+                "name": "cortex_about_me",
+                "description": (
+                    "Synthesize a human-readable summary of what the agent "
+                    "knows about the user. Combines memory stats, "
+                    "categories, and a sample of recent items into one "
+                    "response. Use when the user asks \"what do you know "
+                    "about me?\" — answers in one tool call instead of "
+                    "three. The agent should then quote the summary back."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string"},
+                        "sample_size": {
+                            "type": "integer",
+                            "description": "How many sample memory items to include.",
+                            "default": 10,
+                        },
+                    },
                 },
             },
         ]
@@ -1173,6 +1266,39 @@ class HangarxMemoryProvider(MemoryProvider):
                 )
             elif tool_name == "cortex_resolve_uri":
                 result = self._resolve_uri(str(args["uri"]))
+            elif tool_name == "cortex_memory_stats":
+                result = self._client.memory_stats(
+                    agent_id=args.get("agent_id") or self._agent_id,
+                )
+            elif tool_name == "cortex_memory_categories":
+                result = self._client.memory_categories(
+                    agent_id=args.get("agent_id") or self._agent_id,
+                )
+            elif tool_name == "cortex_memory_items":
+                items = self._client.memory_items(
+                    agent_id=args.get("agent_id") or self._agent_id,
+                )
+                # Optional client-side cap so we don't flood the context.
+                limit = args.get("limit") or 50
+                try:
+                    limit = max(1, int(limit))
+                except (TypeError, ValueError):
+                    limit = 50
+                if isinstance(items, list):
+                    result = items[:limit]
+                elif isinstance(items, dict):
+                    inner = items.get("items") or items.get("data") or items
+                    if isinstance(inner, list):
+                        result = inner[:limit]
+                    else:
+                        result = items
+                else:
+                    result = items
+            elif tool_name == "cortex_about_me":
+                result = self._about_me_summary(
+                    agent_id=args.get("agent_id") or self._agent_id,
+                    sample_size=args.get("sample_size") or 10,
+                )
             else:
                 return json.dumps({"error": f"unknown tool: {tool_name}"})
         except CortexError as exc:
@@ -1327,6 +1453,94 @@ class HangarxMemoryProvider(MemoryProvider):
             )
             return {"path": self._vault.relative(path), "appended": True}
         return {"error": f"unknown vault tool: {tool_name}"}
+
+    def _about_me_summary(
+        self,
+        *,
+        agent_id: Optional[str] = None,
+        sample_size: int = 10,
+    ) -> Dict[str, Any]:
+        """Synthesize a "what do you know about me" summary in one tool call.
+
+        Pulls stats + categories + a sample of recent memory items from
+        Cortex and stitches them into a structured response the agent
+        can quote back to the user. Each section degrades gracefully so
+        a partial failure (e.g. categories endpoint slow) still returns
+        something useful.
+        """
+        if not self._client:
+            return {
+                "error": "cortex_about_me requires Cortex credentials or a local stack",
+                "stats": None,
+                "categories": [],
+                "sample_items": [],
+            }
+
+        agent = agent_id or self._agent_id
+        try:
+            sample_size_int = max(1, min(50, int(sample_size)))
+        except (TypeError, ValueError):
+            sample_size_int = 10
+
+        summary: Dict[str, Any] = {
+            "agent_id": agent,
+            "workspace_id": self._client.workspace_id or None,
+            "stats": None,
+            "categories": [],
+            "sample_items": [],
+            "errors": [],
+        }
+
+        # 1. Top-level counts.
+        try:
+            stats = self._client.memory_stats(agent_id=agent)
+            if isinstance(stats, dict) and "data" in stats:
+                stats = stats["data"]
+            summary["stats"] = stats
+        except CortexError as exc:
+            summary["errors"].append(f"stats: {exc}")
+
+        # 2. Category breakdown.
+        try:
+            cats = self._client.memory_categories(agent_id=agent)
+            if isinstance(cats, dict) and "data" in cats:
+                cats = cats["data"]
+            if isinstance(cats, list):
+                summary["categories"] = cats
+        except CortexError as exc:
+            summary["errors"].append(f"categories: {exc}")
+
+        # 3. Sample of recent items so the user can see actual stored facts.
+        try:
+            items = self._client.memory_items(agent_id=agent)
+            if isinstance(items, dict) and "data" in items:
+                items = items["data"]
+            if isinstance(items, list):
+                # Cortex returns items newest-first by default; cap the
+                # sample so we don't dump the whole memory bank into
+                # the response.
+                summary["sample_items"] = items[:sample_size_int]
+                summary["total_items_returned"] = len(items)
+        except CortexError as exc:
+            summary["errors"].append(f"items: {exc}")
+
+        # 4. Optional profile recall — gives the model a curated view of
+        # high-signal user facts. Use a generic query so we don't need
+        # to know what's stored.
+        try:
+            profile = self._client.recall(
+                "what do you know about the user",
+                limit=sample_size_int,
+                method="hybrid",
+            )
+            if isinstance(profile, dict) and "data" in profile:
+                profile = profile["data"]
+            summary["profile_recall"] = profile
+        except CortexError as exc:
+            summary["errors"].append(f"profile_recall: {exc}")
+            summary["profile_recall"] = None
+
+        return summary
 
     def _resolve_uri(self, uri: str) -> Dict[str, Any]:
         """Route ``vault://`` and ``cortex://`` URIs to their backends.
