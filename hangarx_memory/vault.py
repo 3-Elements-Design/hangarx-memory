@@ -18,12 +18,12 @@ import datetime as _dt
 import io
 import json
 import logging
-import os
 import re
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 _FRONTMATTER_FENCE = "---"
 
 
-def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
+def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """Return ``(frontmatter_dict, body)``.
 
     Supports a deliberately small YAML subset: ``key: value`` pairs,
@@ -62,12 +62,10 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
     fm_lines = lines[1:end_index]
     body = "\n".join(lines[end_index + 1:])
 
-    data: Dict[str, Any] = {}
-    current_key: Optional[str] = None
-    current_list: Optional[List[Any]] = None
+    data: dict[str, Any] = {}
+    current_list: list[Any] | None = None
     for raw in fm_lines:
         if not raw.strip():
-            current_key = None
             current_list = None
             continue
         if current_list is not None and raw.lstrip().startswith("-"):
@@ -80,7 +78,6 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
         key, _, value = raw.partition(":")
         key = key.strip()
         value = value.strip()
-        current_key = key
         current_list = None
         if not value:
             # Could be a block list following.
@@ -96,7 +93,7 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
     return data, body
 
 
-def dump_frontmatter(data: Dict[str, Any]) -> str:
+def dump_frontmatter(data: dict[str, Any]) -> str:
     """Serialize ``data`` to a YAML-ish frontmatter block (no trailing newline)."""
     if not data:
         return ""
@@ -223,7 +220,7 @@ class Vault:
 
     # -- Read ----------------------------------------------------------------
 
-    def read_note(self, relative: str) -> Dict[str, Any]:
+    def read_note(self, relative: str) -> dict[str, Any]:
         """Read a note. Accepts ``Note``, ``Note.md``, ``Folder/Note``, or ``[[Note]]``."""
         candidate = self._resolve_note(relative)
         if not candidate or not candidate.is_file():
@@ -237,7 +234,7 @@ class Vault:
             "size": candidate.stat().st_size,
         }
 
-    def _resolve_note(self, relative: str) -> Optional[Path]:
+    def _resolve_note(self, relative: str) -> Path | None:
         """Find a note by relative path, with or without ``.md``, anywhere in the vault."""
         try:
             direct = self._safe_path(relative)
@@ -265,7 +262,7 @@ class Vault:
         relative: str,
         body: str,
         *,
-        frontmatter: Optional[Dict[str, Any]] = None,
+        frontmatter: dict[str, Any] | None = None,
         overwrite: bool = False,
     ) -> Path:
         """Create (or overwrite) a markdown note under the vault root."""
@@ -285,9 +282,9 @@ class Vault:
         relative: str,
         body: str,
         *,
-        frontmatter_updates: Optional[Dict[str, Any]] = None,
+        frontmatter_updates: dict[str, Any] | None = None,
         create_if_missing: bool = True,
-        initial_frontmatter: Optional[Dict[str, Any]] = None,
+        initial_frontmatter: dict[str, Any] | None = None,
     ) -> Path:
         """Append ``body`` to a note. Creates the file if missing when allowed."""
         target = self._safe_path(relative)
@@ -312,7 +309,7 @@ class Vault:
             target.write_text(content, encoding="utf-8")
         return target
 
-    def _compose_note(self, frontmatter: Dict[str, Any], body: str) -> str:
+    def _compose_note(self, frontmatter: dict[str, Any], body: str) -> str:
         fm_block = dump_frontmatter(frontmatter)
         if fm_block:
             return f"{fm_block}\n{body.rstrip()}\n"
@@ -325,9 +322,9 @@ class Vault:
         query: str,
         *,
         limit: int = 5,
-        folder: Optional[str] = None,
+        folder: str | None = None,
         snippet_window: int = 220,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Lightweight content+filename search.
 
         Scoring: each query term contributes (count_in_body * 1) +
@@ -348,7 +345,7 @@ class Vault:
             if not base.is_dir():
                 return []
 
-        results: List[Tuple[float, Dict[str, Any]]] = []
+        results: list[tuple[float, dict[str, Any]]] = []
         for md_path in base.rglob("*.md"):
             if not md_path.is_file():
                 continue
@@ -404,10 +401,10 @@ class Vault:
     def list_notes(
         self,
         *,
-        folder: Optional[str] = None,
+        folder: str | None = None,
         limit: int = 50,
-        tag: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        tag: str | None = None,
+    ) -> list[dict[str, Any]]:
         base = self.root
         if folder:
             try:
@@ -416,7 +413,7 @@ class Vault:
                 return []
             if not base.is_dir():
                 return []
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for md in base.rglob("*.md"):
             if not md.is_file():
                 continue
@@ -441,7 +438,7 @@ class Vault:
 
     # -- Link formatting -----------------------------------------------------
 
-    def format_link(self, relative_path: str, *, label: Optional[str] = None) -> str:
+    def format_link(self, relative_path: str, *, label: str | None = None) -> str:
         rel = relative_path.replace("\\", "/")
         if rel.lower().endswith(".md"):
             rel_no_ext = rel[:-3]
@@ -457,14 +454,14 @@ class Vault:
 
     # -- Session-note path helpers ------------------------------------------
 
-    def session_note_path(self, session_id: str, *, started_at: Optional[_dt.datetime] = None) -> str:
+    def session_note_path(self, session_id: str, *, started_at: _dt.datetime | None = None) -> str:
         when = started_at or _dt.datetime.now()
         day = when.strftime("%Y-%m-%d")
         base = self.config.sessions_folder.strip("/")
         slug = slugify(session_id or "session", max_length=64)
         return f"{base}/{day}/{slug}.md"
 
-    def daily_note_path(self, *, when: Optional[_dt.datetime] = None) -> str:
+    def daily_note_path(self, *, when: _dt.datetime | None = None) -> str:
         when = when or _dt.datetime.now()
         base = self.config.sessions_folder.strip("/")
         return f"{base}/Daily/{when.strftime('%Y-%m-%d')}.md"
@@ -475,12 +472,12 @@ class Vault:
 # ---------------------------------------------------------------------------
 
 
-def _merge_frontmatter(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_frontmatter(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in (updates or {}).items():
         if key in merged and isinstance(merged[key], list) and isinstance(value, list):
             seen = set()
-            combined: List[Any] = []
+            combined: list[Any] = []
             for item in [*merged[key], *value]:
                 marker = json.dumps(item, default=str, sort_keys=True)
                 if marker in seen:

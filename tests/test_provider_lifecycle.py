@@ -10,7 +10,6 @@ import pytest
 
 from hangarx_memory import HangarxMemoryProvider
 
-
 HERMES_HOOKS = [
     "initialize",
     "is_available",

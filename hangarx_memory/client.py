@@ -7,7 +7,7 @@ standard Hermes environments without extra pip installs.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -17,7 +17,7 @@ class CortexError(RuntimeError):
     """Raised when Cortex returns an HTTP or JSON-RPC error."""
 
 
-def probe_health(base_url: str, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+def probe_health(base_url: str, timeout: float = 0.5) -> dict[str, Any] | None:
     """Hit the unauthenticated ``/health`` endpoint with a tight timeout.
 
     Returns the decoded ``data`` payload on success, ``None`` on any
@@ -81,7 +81,7 @@ class CortexClient:
         self.auth_mode = (auth_mode or "bearer").lower()
         self.timeout = float(timeout or 15.0)
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.auth_mode == "x-api-key":
             headers["x-api-key"] = self.api_key
@@ -93,7 +93,7 @@ class CortexClient:
             headers["x-organization-id"] = self.organization_id
         return headers
 
-    def request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
+    def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         """Send a JSON request and return decoded JSON or text.
 
         ``path`` may be absolute-ish (``/v1/...``) or relative (``v1/...``).
@@ -287,7 +287,7 @@ class CortexClient:
         means the item was useful for the current task; ``False`` flags
         it for downranking. Optional ``comment`` adds free-form context.
         """
-        args: Dict[str, Any] = {
+        args: dict[str, Any] = {
             "memoryId": memory_id,
             "helpful": bool(helpful),
             "workspaceId": kwargs.get("workspace_id") or self.workspace_id or None,
@@ -437,10 +437,10 @@ class CortexClient:
     def mcp_list_tools(self) -> Any:
         return self._mcp_request("tools/list", {})
 
-    def mcp_call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+    def mcp_call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         return self._mcp_request("tools/call", {"name": name, "arguments": arguments or {}})
 
-    def _mcp_request(self, method: str, params: Dict[str, Any]) -> Any:
+    def _mcp_request(self, method: str, params: dict[str, Any]) -> Any:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         result = self.request("POST", "/mcp", payload)
         if isinstance(result, dict) and result.get("error"):
@@ -449,12 +449,12 @@ class CortexClient:
         return result.get("result", result) if isinstance(result, dict) else result
 
 
-def _compact(data: Dict[str, Any]) -> Dict[str, Any]:
+def _compact(data: dict[str, Any]) -> dict[str, Any]:
     """Drop keys whose values are None, preserving false/zero values."""
     return {key: value for key, value in data.items() if value is not None}
 
 
-def _querystring(params: Dict[str, Any]) -> str:
+def _querystring(params: dict[str, Any]) -> str:
     """Encode params as ``?key=value&...`` or return empty string.
 
     Uses urllib.parse.urlencode under the hood so values are properly

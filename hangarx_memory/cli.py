@@ -20,7 +20,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 CONFIG_FILE_NAME = "hangarx-memory.json"
 
@@ -44,7 +44,7 @@ def _load_provider():
         here = Path(__file__).resolve().parent
         provider_file = here / "provider.py"
         if not provider_file.is_file():
-            raise RuntimeError(f"hangarx_memory.provider missing at {provider_file}")
+            raise RuntimeError(f"hangarx_memory.provider missing at {provider_file}") from None
         # Pre-register client.py + vault.py so provider.py's relative
         # imports resolve when we exec it.
         pkg_name = "hangarx_memory_runtime"
@@ -63,7 +63,7 @@ def _load_provider():
             pkg_name, str(provider_file)
         )
         if not spec or not spec.loader:
-            raise RuntimeError("could not locate hangarx-memory provider module")
+            raise RuntimeError("could not locate hangarx-memory provider module") from None
         module = importlib.util.module_from_spec(spec)
         sys.modules[pkg_name] = module
         spec.loader.exec_module(module)
@@ -86,7 +86,7 @@ def _config_path() -> Path:
     return home / CONFIG_FILE_NAME
 
 
-def _load_config_file() -> Dict[str, Any]:
+def _load_config_file() -> dict[str, Any]:
     path = _config_path()
     if not path.is_file():
         return {}
@@ -113,7 +113,7 @@ def _cmd_status(_args: argparse.Namespace) -> int:
 
     # Local auto-detect probe — reuses the same logic as the provider.
     auto_detect = bool(cfg.get("auto_detect_local", True))
-    detected_url: Optional[str] = None
+    detected_url: str | None = None
     if auto_detect and not explicit_url:
         from .client import probe_health  # local import to keep CLI light
 
@@ -154,7 +154,7 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     elif detected_url:
         print(f"  local detect      : healthy at {detected_url}")
     elif auto_detect and not explicit_url:
-        print(f"  local detect      : no local Cortex on default ports")
+        print("  local detect      : no local Cortex on default ports")
     print(f"  effective base    : {effective_url}")
     print(f"  workspace_id      : {workspace}")
     print(f"  organization_id   : {organization}")
@@ -177,7 +177,7 @@ def _cmd_test(_args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"Cortex MCP tools/list failed: {exc}", file=sys.stderr)
         return 1
-    count: Optional[int] = None
+    count: int | None = None
     if isinstance(tools, dict) and isinstance(tools.get("tools"), list):
         count = len(tools["tools"])
     elif isinstance(tools, list):
@@ -258,7 +258,7 @@ def _cmd_vault(args: argparse.Namespace) -> int:
         return 0
     if sub == "search":
         results = vault.search(
-            getattr(args, "query"),
+            args.query,
             limit=int(getattr(args, "limit", 5) or 5),
             folder=getattr(args, "folder", None),
         )
@@ -314,7 +314,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         return 1
     print("To schedule nightly Cortex reflection, paste this into a Hermes chat:")
     print()
-    print(f"  /cron create name='hangarx-memory nightly reflection' \\")
+    print("  /cron create name='hangarx-memory nightly reflection' \\")
     print(f"    schedule='{schedule}' no_agent=True \\")
     print(f"    script='{script}'")
     print()

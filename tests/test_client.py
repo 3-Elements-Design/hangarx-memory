@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
-from typing import Generator
 
 import pytest
 
 from hangarx_memory.client import CortexClient, probe_health
-
 
 # ---------------------------------------------------------------------------
 # Mini HTTP server for end-to-end probe tests (no monkeypatching required).

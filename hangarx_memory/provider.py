@@ -21,7 +21,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .client import CortexClient, CortexError, probe_health
 
@@ -71,9 +71,9 @@ except Exception:  # pragma: no cover - fallback for offline tests
             return None
 
         @abstractmethod
-        def get_tool_schemas(self) -> List[Dict[str, Any]]: ...
+        def get_tool_schemas(self) -> list[dict[str, Any]]: ...
 
-        def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
             return json.dumps({"error": f"unhandled tool: {tool_name}"})
 
         def shutdown(self) -> None:
@@ -82,13 +82,13 @@ except Exception:  # pragma: no cover - fallback for offline tests
         def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
             return None
 
-        def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        def on_session_end(self, messages: list[dict[str, Any]]) -> None:
             return None
 
         def on_session_switch(self, new_session_id: str, **kwargs) -> None:
             return None
 
-        def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+        def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
             return ""
 
         def on_memory_write(
@@ -96,14 +96,14 @@ except Exception:  # pragma: no cover - fallback for offline tests
             action: str,
             target: str,
             content: str,
-            metadata: Optional[Dict[str, Any]] = None,
+            metadata: dict[str, Any] | None = None,
         ) -> None:
             return None
 
-        def get_config_schema(self) -> List[Dict[str, Any]]:
+        def get_config_schema(self) -> list[dict[str, Any]]:
             return []
 
-        def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+        def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
             return None
 
 
@@ -138,28 +138,28 @@ class HangarxMemoryProvider(MemoryProvider):
     # -- Construction --------------------------------------------------------
 
     def __init__(self) -> None:
-        self._config: Dict[str, Any] = {}
-        self._client: Optional[CortexClient] = None
+        self._config: dict[str, Any] = {}
+        self._client: CortexClient | None = None
         self._session_id: str = ""
         self._agent_id: str = DEFAULT_AGENT_ID
         self._platform: str = "cli"
         self._agent_context: str = "primary"
         self._prefetch_cache: str = ""
         self._prefetch_lock = threading.Lock()
-        self._sync_thread: Optional[threading.Thread] = None
+        self._sync_thread: threading.Thread | None = None
         self._shutdown_event = threading.Event()
-        self._available_cache: Optional[bool] = None
-        self._vault: Optional[Vault] = None
-        self._session_started_at: Optional[float] = None
+        self._available_cache: bool | None = None
+        self._vault: Vault | None = None
+        self._session_started_at: float | None = None
         self._turn_counter: int = 0
         # Last batch of Cortex citations from a prefetch — surfaced to the
         # model when streaming, used for #15 vault link injection.
-        self._last_citations: List[Dict[str, Any]] = []
+        self._last_citations: list[dict[str, Any]] = []
         # Per-session running list of (turn, summary, citations) so the
         # session-end summary note (#7) can backlink to referenced notes.
-        self._session_turn_log: List[Dict[str, Any]] = []
+        self._session_turn_log: list[dict[str, Any]] = []
         # Memory-id → vault path map for #15 wikilink injection.
-        self._memory_id_to_vault: Dict[str, str] = {}
+        self._memory_id_to_vault: dict[str, str] = {}
 
     @property
     def name(self) -> str:
@@ -167,9 +167,9 @@ class HangarxMemoryProvider(MemoryProvider):
 
     # -- Config loading ------------------------------------------------------
 
-    def _load_config(self, hermes_home: str) -> Dict[str, Any]:
+    def _load_config(self, hermes_home: str) -> dict[str, Any]:
         """Merge config.json + env vars. Env wins so .env can override files."""
-        cfg: Dict[str, Any] = {}
+        cfg: dict[str, Any] = {}
         if hermes_home:
             config_path = Path(hermes_home) / CONFIG_FILE_NAME
             if config_path.is_file():
@@ -308,7 +308,7 @@ class HangarxMemoryProvider(MemoryProvider):
 
     # -- Local auto-detect ---------------------------------------------------
 
-    def _detect_local_cortex(self) -> Optional[str]:
+    def _detect_local_cortex(self) -> str | None:
         """Probe configured candidate URLs for a running Cortex ``/health``.
 
         Returns the first URL that responds healthy (``ready: true``),
@@ -357,7 +357,7 @@ class HangarxMemoryProvider(MemoryProvider):
 
         home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
         path = Path(home) / CONFIG_FILE_NAME
-        cfg_data: Dict[str, Any] = {}
+        cfg_data: dict[str, Any] = {}
         if path.is_file():
             try:
                 cfg_data = json.loads(path.read_text(encoding="utf-8"))
@@ -508,7 +508,7 @@ class HangarxMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._client and not self._vault:
             return ""
-        parts: List[str] = []
+        parts: list[str] = []
         if self._client:
             parts.append(
                 "HangarX Cortex memory is active. You have tools for grounded recall "
@@ -720,7 +720,7 @@ class HangarxMemoryProvider(MemoryProvider):
         action: str,
         target: str,
         content: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         if not content or not content.strip():
             return
@@ -750,7 +750,7 @@ class HangarxMemoryProvider(MemoryProvider):
 
     # -- on_pre_compress -----------------------------------------------------
 
-    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+    def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
         if not messages:
             return ""
         if not self._client and not self._vault:
@@ -784,7 +784,7 @@ class HangarxMemoryProvider(MemoryProvider):
 
     # -- on_session_end ------------------------------------------------------
 
-    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+    def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         if not self._client and not self._vault:
             return
         # Best-effort: fire auto-promote first to distill any verbatim
@@ -815,8 +815,8 @@ class HangarxMemoryProvider(MemoryProvider):
 
     # -- Tools ---------------------------------------------------------------
 
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        schemas: List[Dict[str, Any]] = []
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
+        schemas: list[dict[str, Any]] = []
         compact = self._config.get("tool_mode", "full") == "compact"
         if self._client:
             cortex_schemas = self._cortex_tool_schemas()
@@ -840,7 +840,7 @@ class HangarxMemoryProvider(MemoryProvider):
                 schemas.append(self._cortex_ingest_vault_schema())
         return schemas
 
-    def _cortex_dedup_tool_schemas(self) -> List[Dict[str, Any]]:
+    def _cortex_dedup_tool_schemas(self) -> list[dict[str, Any]]:
         """Tools that let the model clean up its own writes."""
         return [
             {
@@ -924,7 +924,7 @@ class HangarxMemoryProvider(MemoryProvider):
             },
         ]
 
-    def _cortex_introspection_tool_schemas(self) -> List[Dict[str, Any]]:
+    def _cortex_introspection_tool_schemas(self) -> list[dict[str, Any]]:
         """Tools that let the user audit what the agent remembers about them.
 
         These wrap the unauthenticated-friendly read paths of Cortex's
@@ -1013,7 +1013,7 @@ class HangarxMemoryProvider(MemoryProvider):
             },
         ]
 
-    def _cortex_tool_schemas(self) -> List[Dict[str, Any]]:
+    def _cortex_tool_schemas(self) -> list[dict[str, Any]]:
         return [
             {
                 "name": "cortex_recall",
@@ -1136,7 +1136,7 @@ class HangarxMemoryProvider(MemoryProvider):
             },
         ]
 
-    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
         args = args or {}
 
         # Vault-backed tools work even without a Cortex client.
@@ -1310,7 +1310,7 @@ class HangarxMemoryProvider(MemoryProvider):
 
     # -- Vault tools ---------------------------------------------------------
 
-    def _vault_tool_schemas(self) -> List[Dict[str, Any]]:
+    def _vault_tool_schemas(self) -> list[dict[str, Any]]:
         return [
             {
                 "name": "vault_search",
@@ -1398,7 +1398,7 @@ class HangarxMemoryProvider(MemoryProvider):
             },
         ]
 
-    def _cortex_ingest_vault_schema(self) -> Dict[str, Any]:
+    def _cortex_ingest_vault_schema(self) -> dict[str, Any]:
         return {
             "name": "cortex_ingest_vault",
             "description": (
@@ -1416,7 +1416,7 @@ class HangarxMemoryProvider(MemoryProvider):
             },
         }
 
-    def _handle_vault_tool(self, tool_name: str, args: Dict[str, Any]) -> Any:
+    def _handle_vault_tool(self, tool_name: str, args: dict[str, Any]) -> Any:
         assert self._vault is not None
         if tool_name == "vault_search":
             return {
@@ -1457,9 +1457,9 @@ class HangarxMemoryProvider(MemoryProvider):
     def _about_me_summary(
         self,
         *,
-        agent_id: Optional[str] = None,
+        agent_id: str | None = None,
         sample_size: int = 10,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Synthesize a "what do you know about me" summary in one tool call.
 
         Pulls stats + categories + a sample of recent memory items from
@@ -1482,7 +1482,7 @@ class HangarxMemoryProvider(MemoryProvider):
         except (TypeError, ValueError):
             sample_size_int = 10
 
-        summary: Dict[str, Any] = {
+        summary: dict[str, Any] = {
             "agent_id": agent,
             "workspace_id": self._client.workspace_id or None,
             "stats": None,
@@ -1542,7 +1542,7 @@ class HangarxMemoryProvider(MemoryProvider):
 
         return summary
 
-    def _resolve_uri(self, uri: str) -> Dict[str, Any]:
+    def _resolve_uri(self, uri: str) -> dict[str, Any]:
         """Route ``vault://`` and ``cortex://`` URIs to their backends.
 
         ``vault://Folder/Note`` returns the read note (same shape as
@@ -1591,7 +1591,7 @@ class HangarxMemoryProvider(MemoryProvider):
 
     # -- Vault writers used by lifecycle hooks ------------------------------
 
-    def _format_citations_block(self, citations: List[Dict[str, Any]]) -> str:
+    def _format_citations_block(self, citations: list[dict[str, Any]]) -> str:
         """Turn Cortex citation entries into a markdown bullet list.
 
         Each citation whose ``source`` resolves to a real vault note
@@ -1601,7 +1601,7 @@ class HangarxMemoryProvider(MemoryProvider):
         """
         if not citations:
             return ""
-        lines: List[str] = []
+        lines: list[str] = []
         for cit in citations[:8]:
             source = (cit.get("source") or "").strip() if isinstance(cit, dict) else ""
             memory_id = cit.get("memory_id") or cit.get("memoryId") or "" if isinstance(cit, dict) else ""
@@ -1669,7 +1669,7 @@ class HangarxMemoryProvider(MemoryProvider):
                 items = result["data"].get("items") or result["data"].get("memories") or []
         if not isinstance(items, list) or not items:
             return ""
-        lines: List[str] = []
+        lines: list[str] = []
         for item in items[:8]:
             if not isinstance(item, dict):
                 continue
@@ -1703,7 +1703,7 @@ class HangarxMemoryProvider(MemoryProvider):
         session_id: str,
         user_content: str,
         assistant_content: str,
-        metadata: Dict[str, Any],
+        metadata: dict[str, Any],
     ) -> None:
         if not self._vault:
             return
@@ -1755,7 +1755,7 @@ class HangarxMemoryProvider(MemoryProvider):
         target: str,
         content: str,
         category: str,
-        metadata: Dict[str, Any],
+        metadata: dict[str, Any],
     ) -> None:
         if not self._vault:
             return
@@ -1798,8 +1798,8 @@ class HangarxMemoryProvider(MemoryProvider):
 
         # Gather all unique citations across turns
         seen_sources: set = set()
-        ordered_links: List[str] = []
-        related_paths: List[str] = []
+        ordered_links: list[str] = []
+        related_paths: list[str] = []
         for turn in self._session_turn_log:
             for cit in turn.get("citations") or []:
                 if not isinstance(cit, dict):
@@ -1820,7 +1820,7 @@ class HangarxMemoryProvider(MemoryProvider):
 
         # Build the markdown body
         when = _dt.datetime.now()
-        lines: List[str] = []
+        lines: list[str] = []
         turn_count = len(self._session_turn_log)
         lines.append(
             f"Session **{self._session_id}** wrapped up at "
@@ -1848,7 +1848,7 @@ class HangarxMemoryProvider(MemoryProvider):
                 lines.append(f"- {link}")
 
         body = "\n".join(lines)
-        frontmatter: Dict[str, Any] = {
+        frontmatter: dict[str, Any] = {
             "type": "hermes-session-summary",
             "session_id": self._session_id,
             "ended": when.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1887,7 +1887,7 @@ class HangarxMemoryProvider(MemoryProvider):
 
     # -- Config schema -------------------------------------------------------
 
-    def get_config_schema(self) -> List[Dict[str, Any]]:
+    def get_config_schema(self) -> list[dict[str, Any]]:
         return [
             {
                 "key": "api_key",
@@ -2035,7 +2035,7 @@ class HangarxMemoryProvider(MemoryProvider):
             },
         ]
 
-    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+    def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
         path = Path(hermes_home) / CONFIG_FILE_NAME
         # Strip secrets — Hermes writes those to .env via env_var.
         sanitized = {k: v for k, v in values.items() if k != "api_key"}
@@ -2064,7 +2064,7 @@ def _extract_ask_context(response: Any) -> str:
     return ""
 
 
-def _extract_citations(response: Any) -> List[Dict[str, Any]]:
+def _extract_citations(response: Any) -> list[dict[str, Any]]:
     """Pull a normalized citation list out of an ask_context response.
 
     Cortex citations come back in a few shapes depending on whether
@@ -2081,7 +2081,7 @@ def _extract_citations(response: Any) -> List[Dict[str, Any]]:
     payload = response.get("result") if isinstance(response.get("result"), dict) else response
     if not isinstance(payload, dict):
         return []
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     cits = payload.get("citations") or payload.get("sources")
     if isinstance(cits, list):
         for cit in cits:
@@ -2108,7 +2108,7 @@ def _extract_citations(response: Any) -> List[Dict[str, Any]]:
                             })
     # Deduplicate by (source, memory_id) — preserve order.
     seen = set()
-    deduped: List[Dict[str, Any]] = []
+    deduped: list[dict[str, Any]] = []
     for cit in out:
         if not cit:
             continue
@@ -2135,9 +2135,9 @@ def _join_context_blocks(*labelled_blocks: tuple) -> str:
     return "\n\n".join(parts)
 
 
-def _summarize_messages(messages: List[Dict[str, Any]]) -> str:
+def _summarize_messages(messages: list[dict[str, Any]]) -> str:
     """Flatten Hermes messages into a plain-text transcript for storage."""
-    lines: List[str] = []
+    lines: list[str] = []
     for msg in messages:
         if not isinstance(msg, dict):
             continue

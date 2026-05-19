@@ -7,13 +7,12 @@ default) hits a real localhost:3400 if available.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, List
+from typing import Any
 
 import pytest
 
 import hangarx_memory.provider as provider_mod
 from hangarx_memory import HangarxMemoryProvider
-
 
 # ---------------------------------------------------------------------------
 # probe_health mock fixtures
@@ -21,16 +20,16 @@ from hangarx_memory import HangarxMemoryProvider
 
 
 @pytest.fixture
-def probe_calls() -> List[str]:
+def probe_calls() -> list[str]:
     """Records every URL passed to probe_health during a test."""
     return []
 
 
 @pytest.fixture
-def fake_probe(probe_calls: List[str], monkeypatch: pytest.MonkeyPatch):
+def fake_probe(probe_calls: list[str], monkeypatch: pytest.MonkeyPatch):
     """Factory that installs a fake probe_health returning a configured map."""
 
-    def install(responses: Dict[str, Optional[Dict[str, Any]]]):
+    def install(responses: dict[str, dict[str, Any] | None]):
         def _probe(url: str, timeout: float = 0.5):
             probe_calls.append(url)
             return responses.get(url)
@@ -54,7 +53,7 @@ class TestDetection:
         self,
         hermes_home: Path,
         fake_probe,
-        probe_calls: List[str],
+        probe_calls: list[str],
     ) -> None:
         fake_probe({
             "http://localhost:3400": HEALTHY,
@@ -71,7 +70,7 @@ class TestDetection:
         self,
         hermes_home: Path,
         fake_probe,
-        probe_calls: List[str],
+        probe_calls: list[str],
     ) -> None:
         fake_probe({
             "http://localhost:3400": None,
@@ -129,7 +128,7 @@ class TestExplicitURL:
         hermes_home: Path,
         write_config,
         fake_probe,
-        probe_calls: List[str],
+        probe_calls: list[str],
     ) -> None:
         write_config(base_url="https://my-cortex.example.com")
         fake_probe({"http://localhost:3400": HEALTHY})
@@ -144,7 +143,7 @@ class TestExplicitURL:
         self,
         hermes_home: Path,
         fake_probe,
-        probe_calls: List[str],
+        probe_calls: list[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("CORTEX_API_URL", "https://env-cortex.example.com")
@@ -162,7 +161,7 @@ class TestDisabled:
         hermes_home: Path,
         write_config,
         fake_probe,
-        probe_calls: List[str],
+        probe_calls: list[str],
     ) -> None:
         write_config(auto_detect_local=False)
         fake_probe({"http://localhost:3400": HEALTHY})
@@ -189,7 +188,7 @@ class TestEnvOverride:
         self,
         hermes_home: Path,
         fake_probe,
-        probe_calls: List[str],
+        probe_calls: list[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv(

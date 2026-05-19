@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,7 +15,6 @@ import pytest
 import hangarx_memory.provider as provider_mod
 from hangarx_memory import HangarxMemoryProvider
 from hangarx_memory.client import CortexError, probe_health
-
 
 # ---------------------------------------------------------------------------
 # Test fixtures
