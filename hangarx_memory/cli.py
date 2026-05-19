@@ -290,6 +290,192 @@ def _cmd_vault(args: argparse.Namespace) -> int:
     return 1
 
 
+def _find_compose_file() -> Path | None:
+    """Locate the bundled docker-compose.cortex.yml.
+
+    Two install layouts must work:
+      1. Plugin folder layout (``$HERMES_HOME/plugins/hangarx-memory/``)
+         where docker-compose.cortex.yml sits next to plugin.yaml at the
+         root.
+      2. pip-installed layout where ``hangarx_memory/`` is on the import
+         path but the package-root compose file lives one directory up.
+
+    Returns the first match or None.
+    """
+    here = Path(__file__).resolve().parent  # hangarx_memory/
+    candidates = [
+        here.parent / "docker-compose.cortex.yml",   # plugin folder layout
+        here / "docker-compose.cortex.yml",          # site-packages layout
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    # Final fallback: search the user's plugin folder if HERMES_HOME is
+    # set. Covers the case where someone copied the compose file but not
+    # the inner package.
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    fallback = Path(home) / "plugins" / "hangarx-memory" / "docker-compose.cortex.yml"
+    if fallback.is_file():
+        return fallback
+    return None
+
+
+def _docker_available() -> tuple[bool, str]:
+    """Return (ok, message). ok=False when docker isn't usable."""
+    import shutil
+    if shutil.which("docker") is None:
+        return False, (
+            "docker command not found. Install Docker Desktop or the "
+            "docker engine: https://docs.docker.com/get-docker/"
+        )
+    # Verify the daemon is running.
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception as exc:
+        return False, f"docker info failed: {exc}"
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip().splitlines()[-1] if result.stderr else "unknown"
+        return False, (
+            "docker daemon not reachable. Start Docker Desktop (macOS / "
+            f"Windows) or `sudo systemctl start docker` (Linux). Detail: {stderr}"
+        )
+    return True, result.stdout.strip()
+
+
+def _cmd_docker(args: argparse.Namespace) -> int:
+    """Drive the bundled docker-compose.cortex.yml stack on the user's behalf.
+
+    Subcommands:
+      up      — start FalkorDB + Cortex API in the background
+      down    — stop and remove containers (volumes preserved)
+      status  — show running containers + health
+      logs    — tail container logs (--follow to stream)
+      pull    — pre-fetch images without starting
+      path    — print the compose file path (useful for shell aliases)
+    """
+    import subprocess as _sp
+
+    sub = getattr(args, "docker_subcommand", None) or "status"
+
+    compose_file = _find_compose_file()
+    if compose_file is None and sub != "path":
+        print(
+            "docker-compose.cortex.yml not found. Expected next to plugin.yaml "
+            "in your hangarx-memory install. Try reinstalling or run "
+            "`hermes hangarx-memory docker path` to see where we looked.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if sub == "path":
+        if compose_file:
+            print(compose_file)
+        else:
+            print("(compose file not found)", file=sys.stderr)
+            return 2
+        return 0
+
+    ok, info = _docker_available()
+    if not ok:
+        print(info, file=sys.stderr)
+        return 2
+
+    base = ["docker", "compose", "-f", str(compose_file)]
+
+    if sub == "up":
+        # -d so the agent loop returns; --wait blocks until healthchecks pass.
+        cmd = base + ["up", "-d", "--wait"]
+        print(f"+ {' '.join(cmd)}")
+        result = _sp.run(cmd)
+        if result.returncode != 0:
+            return result.returncode
+        # Quick sanity probe so the user knows the API is live.
+        try:
+            from .client import probe_health
+        except ImportError:
+            probe_health = None  # type: ignore[assignment]
+        if probe_health is not None:
+            data = probe_health("http://localhost:3400", timeout=2.0)
+            if data:
+                services = data.get("services") or {}
+                print()
+                print("Cortex API is healthy at http://localhost:3400")
+                if isinstance(services, dict) and services:
+                    for name, status in services.items():
+                        print(f"  - {name}: {status}")
+                print()
+                print(
+                    "hangarx-memory will auto-detect this stack on the next "
+                    "Hermes session. No CORTEX_API_KEY required for local use."
+                )
+            else:
+                print()
+                print(
+                    "Stack started but /health didn't respond within 2 s. "
+                    "Check logs with: hermes hangarx-memory docker logs"
+                )
+        return 0
+
+    if sub == "down":
+        keep_volumes = not getattr(args, "purge", False)
+        cmd = base + (["down"] if keep_volumes else ["down", "-v"])
+        print(f"+ {' '.join(cmd)}")
+        return _sp.run(cmd).returncode
+
+    if sub == "status":
+        cmd = base + ["ps"]
+        print(f"+ {' '.join(cmd)}")
+        rc = _sp.run(cmd).returncode
+        # Augment with a live probe so users see API health, not just
+        # container state.
+        try:
+            from .client import probe_health
+        except ImportError:
+            probe_health = None  # type: ignore[assignment]
+        if probe_health is not None:
+            data = probe_health("http://localhost:3400", timeout=1.0)
+            print()
+            if data:
+                print(
+                    f"API status: healthy (ready={data.get('ready', '?')})"
+                )
+                services = data.get("services") or {}
+                if isinstance(services, dict):
+                    for name, status in services.items():
+                        print(f"  - {name}: {status}")
+            else:
+                print("API status: not responding on http://localhost:3400")
+        return rc
+
+    if sub == "logs":
+        follow = bool(getattr(args, "follow", False))
+        service = getattr(args, "service", None)
+        cmd = base + ["logs"]
+        if follow:
+            cmd.append("-f")
+        else:
+            cmd += ["--tail", "100"]
+        if service:
+            cmd.append(service)
+        print(f"+ {' '.join(cmd)}")
+        return _sp.run(cmd).returncode
+
+    if sub == "pull":
+        cmd = base + ["pull"]
+        print(f"+ {' '.join(cmd)}")
+        return _sp.run(cmd).returncode
+
+    print(
+        "Usage: hermes hangarx-memory docker <up|down|status|logs|pull|path>",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def _cmd_schedule(args: argparse.Namespace) -> int:
     """Print the cron-install snippet for the background reflection script.
 
@@ -341,9 +527,13 @@ def hangarx_memory_command(args: argparse.Namespace) -> int:
         return _cmd_reflect(args)
     if sub == "vault":
         return _cmd_vault(args)
+    if sub == "docker":
+        return _cmd_docker(args)
     if sub == "schedule":
         return _cmd_schedule(args)
-    print("Usage: hermes hangarx-memory <status|test|tools|reflect|vault|schedule>")
+    print(
+        "Usage: hermes hangarx-memory <status|test|tools|reflect|vault|docker|schedule>"
+    )
     return 1
 
 
@@ -375,6 +565,42 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     vsearch.add_argument("--limit", type=int, default=5)
     vopen = vault_subs.add_parser("open", help="Open the vault (or a folder) in Finder")
     vopen.add_argument("path", nargs="?", default=None)
+
+    docker = subs.add_parser(
+        "docker",
+        help="Manage the local Cortex stack (FalkorDB + Cortex API)",
+    )
+    docker_subs = docker.add_subparsers(dest="docker_subcommand")
+    docker_subs.add_parser(
+        "up", help="Start the local Cortex stack in the background"
+    )
+    down_p = docker_subs.add_parser(
+        "down", help="Stop the local Cortex stack (volumes preserved by default)"
+    )
+    down_p.add_argument(
+        "--purge",
+        action="store_true",
+        help="Also delete the FalkorDB volume (destroys local memory data)",
+    )
+    docker_subs.add_parser(
+        "status", help="Show containers + live /health probe"
+    )
+    logs_p = docker_subs.add_parser(
+        "logs", help="Print recent container logs"
+    )
+    logs_p.add_argument("-f", "--follow", action="store_true", help="Stream logs")
+    logs_p.add_argument(
+        "service",
+        nargs="?",
+        choices=["cortex-api", "falkordb"],
+        help="Limit to a single service (default: all)",
+    )
+    docker_subs.add_parser(
+        "pull", help="Pre-fetch images without starting containers"
+    )
+    docker_subs.add_parser(
+        "path", help="Print the path to docker-compose.cortex.yml"
+    )
 
     sched = subs.add_parser(
         "schedule",

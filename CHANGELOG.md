@@ -4,6 +4,57 @@ All notable changes to `hangarx-memory` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-05-19
+
+The "local-first install" release. The plugin now ships with a
+working all-in-one Cortex stack and a CLI to drive it, so users without
+the HangarX Obsidian plugin (or anyone who wants offline-only Cortex)
+can spin up the full memory backend in one command.
+
+### Added — bundled local Cortex stack
+
+- **`docker-compose.cortex.yml`** at the package root — self-contained
+  FalkorDB + Cortex API deployment optimized for a developer laptop.
+  In-memory storage (no Postgres / ClickHouse), Ollama LLM by default,
+  ~2 GB RAM limit. The plugin auto-detects this stack at
+  `http://localhost:3400` and runs in keyless local mode.
+- **Mirrored copy inside `hangarx_memory/`** so `pip install
+  hangarx-memory` ships the compose file too. CLI discovery looks in
+  both locations.
+- **`pyproject.toml`** updated: `package-data` now includes
+  `docker-compose.cortex.yml`.
+
+### Added — `hermes hangarx-memory docker` subcommand
+
+Six subcommands that drive the bundled compose stack on the user's
+behalf:
+
+| Command | What it does |
+|---|---|
+| `docker up` | Start FalkorDB + Cortex API in the background; wait for healthcheck; probe `/health` |
+| `docker down` | Stop and remove containers (volumes preserved). `--purge` also deletes the FalkorDB volume |
+| `docker status` | `docker compose ps` + live `/health` probe with service breakdown |
+| `docker logs` | Tail last 100 lines. `-f` to stream. Optional service filter (`cortex-api` / `falkordb`) |
+| `docker pull` | Pre-fetch images without starting |
+| `docker path` | Print the compose file path (useful for shell aliases) |
+
+The CLI fails fast with clear errors when Docker isn't installed or the
+daemon isn't running.
+
+### Changed
+
+- **README.md** rewritten with v0.5.0 features + the docker quickstart
+  prominently placed.
+- **Public docs** at `apps/web/public/markdown-docs/integrations/hermes-agent.md`
+  rewritten to match. References the standalone GitHub repo and links
+  to the changelog.
+
+### Engineering
+
+- **13 new tests** in `tests/test_docker_cli.py` covering compose file
+  discovery, docker availability probing, subcommand dispatch, and
+  argparse wiring. Total suite now **181 passing**, ruff clean.
+
 ## [0.5.0] — 2026-05-19
 
 The "audit + isolation" release. Three category-defining features land

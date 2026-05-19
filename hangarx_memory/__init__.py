@@ -10,7 +10,7 @@ activated via ``hermes config set memory.provider hangarx-memory``.
 
 from __future__ import annotations
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from .provider import HangarxMemoryProvider, register
 
