@@ -1,0 +1,314 @@
+diff --git a/agent/memory_manager.py b/agent/memory_manager.py
+index 7eda64fba..91c0348a7 100644
+--- a/agent/memory_manager.py
++++ b/agent/memory_manager.py
+@@ -227,26 +227,48 @@ class MemoryManager:
+ 
+         self._providers.append(provider)
+ 
+-        # Index tool names → provider for routing
++        # Index tool names → provider for routing. Some providers (e.g.
++        # hangarx-memory) only expose their full tool surface after
++        # ``initialize()`` has loaded config and constructed a client/vault,
++        # so the schema list returned here can be empty. ``initialize_all``
++        # calls ``_reindex_tools()`` later to pick up those late-arriving
++        # tools — without it the model sees the schemas (Hermes injects
++        # them into ``agent.tools``) but the manager dispatch table never
++        # routes them and the agent returns ``Unknown tool: cortex_recall``.
++        self._reindex_tools(provider)
++
++        logger.info(
++            "Memory provider '%s' registered (%d tools)",
++            provider.name,
++            len(provider.get_tool_schemas()),
++        )
++
++    def _reindex_tools(self, provider: MemoryProvider) -> None:
++        """Refresh the tool→provider routing table for a single provider.
++
++        Idempotent: calling this multiple times for the same provider is
++        safe — entries already pointing at ``provider`` are left alone,
++        entries pointing at a different provider are kept and logged as
++        conflicts (first-registered wins), and brand-new tool names are
++        added. This is what makes "register, then initialize" work for
++        providers whose tool surface depends on ``initialize()``.
++        """
+         for schema in provider.get_tool_schemas():
+             tool_name = schema.get("name", "")
+-            if tool_name and tool_name not in self._tool_to_provider:
++            if not tool_name:
++                continue
++            existing = self._tool_to_provider.get(tool_name)
++            if existing is None:
+                 self._tool_to_provider[tool_name] = provider
+-            elif tool_name in self._tool_to_provider:
++            elif existing is not provider:
+                 logger.warning(
+                     "Memory tool name conflict: '%s' already registered by %s, "
+                     "ignoring from %s",
+                     tool_name,
+-                    self._tool_to_provider[tool_name].name,
++                    existing.name,
+                     provider.name,
+                 )
+ 
+-        logger.info(
+-            "Memory provider '%s' registered (%d tools)",
+-            provider.name,
+-            len(provider.get_tool_schemas()),
+-        )
+-
+     @property
+     def providers(self) -> List[MemoryProvider]:
+         """All registered providers in order."""
+@@ -541,6 +563,15 @@ class MemoryManager:
+         Automatically injects ``hermes_home`` into *kwargs* so that every
+         provider can resolve profile-scoped storage paths without importing
+         ``get_hermes_home()`` themselves.
++
++        After each provider initializes successfully, we re-index its tool
++        schemas. This is required for providers whose tool surface depends
++        on ``initialize()`` (e.g. ``hangarx-memory`` only exposes
++        ``cortex_recall`` / ``vault_list_notes`` once it has built a Cortex
++        client and Vault). Without the post-init reindex the model sees
++        those tools (Hermes injects the schemas into ``agent.tools``) but
++        the manager dispatch table doesn't know them, and the agent
++        returns ``Unknown tool: cortex_recall``.
+         """
+         if "hermes_home" not in kwargs:
+             from hermes_constants import get_hermes_home
+@@ -553,3 +584,14 @@ class MemoryManager:
+                     "Memory provider '%s' initialize failed: %s",
+                     provider.name, e,
+                 )
++                continue
++            # Reindex *after* successful init so late-arriving tools land
++            # in the routing table. ``_reindex_tools`` is idempotent for
++            # providers whose schema set was already known at add time.
++            try:
++                self._reindex_tools(provider)
++            except Exception as e:
++                logger.warning(
++                    "Memory provider '%s' tool reindex failed: %s",
++                    provider.name, e,
++                )
+diff --git a/tests/agent/test_memory_manager_late_tools.py b/tests/agent/test_memory_manager_late_tools.py
+new file mode 100644
+index 000000000..ee10ce067
+--- /dev/null
++++ b/tests/agent/test_memory_manager_late_tools.py
+@@ -0,0 +1,214 @@
++"""Regression tests for MemoryManager handling of providers whose tool
++
++surface only materializes after ``initialize()``.
++
++Bug context
++-----------
++
++``MemoryManager.add_provider()`` indexes ``provider.get_tool_schemas()``
++into ``_tool_to_provider`` at registration time. Some providers — notably
++``hangarx-memory`` — return an *empty* schema list before ``initialize()``
++because their Cortex client and Obsidian vault are only constructed inside
++that lifecycle hook. Before this fix, that meant:
++
++* The provider was registered with 0 routable tools.
++* After init, the provider's full tool surface (``cortex_recall``,
++  ``cortex_remember``, ``vault_list_notes``, …) was injected into
++  ``agent.tools`` (advertised to the model), but the manager's dispatch
++  table still didn't know them.
++* The model called the tool; the executor looked it up in
++  ``_memory_manager.has_tool()``; it returned False; the call fell
++  through to the global registry; the registry didn't have it; the agent
++  returned ``{"error": "Unknown tool: cortex_recall"}``.
++
++The fix is to re-index each provider after ``initialize_all()`` runs so
++late-arriving tools land in the routing table. These tests pin that
++behaviour down deterministically — no Cortex, no vault, no network: just
++a fake provider that mirrors the hangarx-memory lifecycle (empty before
++init, populated after).
++"""
++
++import json
++
++import pytest
++
++from agent.memory_provider import MemoryProvider
++from agent.memory_manager import MemoryManager
++
++
++# ---------------------------------------------------------------------------
++# Fakes
++# ---------------------------------------------------------------------------
++
++
++class _LateToolsProvider(MemoryProvider):
++    """Provider whose tool surface only appears after ``initialize()``.
++
++    Mirrors how the real ``hangarx-memory`` provider behaves: before
++    ``initialize()`` ``get_tool_schemas()`` returns ``[]`` because there
++    is no Cortex client / vault yet; after init it returns the full set.
++    """
++
++    POST_INIT_TOOLS = [
++        {"name": "cortex_recall", "description": "x", "parameters": {}},
++        {"name": "cortex_remember", "description": "x", "parameters": {}},
++        {"name": "vault_list_notes", "description": "x", "parameters": {}},
++    ]
++
++    def __init__(self, name: str = "late-tools") -> None:
++        self._name = name
++        self._initialized = False
++        self.handled: list[tuple[str, dict]] = []
++
++    @property
++    def name(self) -> str:
++        return self._name
++
++    def is_available(self) -> bool:
++        return True
++
++    def initialize(self, session_id: str, **kwargs) -> None:
++        self._initialized = True
++
++    def get_tool_schemas(self):
++        if not self._initialized:
++            return []
++        return list(self.POST_INIT_TOOLS)
++
++    def handle_tool_call(self, tool_name: str, args, **kwargs) -> str:
++        self.handled.append((tool_name, dict(args or {})))
++        return json.dumps({"ok": True, "tool": tool_name})
++
++
++class _StableToolsProvider(MemoryProvider):
++    """Provider with a fixed tool surface known at registration time."""
++
++    def __init__(self, name: str = "builtin") -> None:
++        self._name = name
++
++    @property
++    def name(self) -> str:
++        return self._name
++
++    def is_available(self) -> bool:
++        return True
++
++    def initialize(self, session_id: str, **kwargs) -> None:
++        pass
++
++    def get_tool_schemas(self):
++        return [{"name": "memory_search", "description": "x", "parameters": {}}]
++
++    def handle_tool_call(self, tool_name: str, args, **kwargs) -> str:
++        return json.dumps({"ok": True, "tool": tool_name})
++
++
++# ---------------------------------------------------------------------------
++# Tests
++# ---------------------------------------------------------------------------
++
++
++class TestLateBoundProviderTools:
++    def test_provider_has_no_tools_before_initialize(self):
++        """Sanity check: the fake mirrors the hangarx-memory lifecycle."""
++        p = _LateToolsProvider()
++        assert p.get_tool_schemas() == []
++
++    def test_add_provider_alone_does_not_route_late_tools(self):
++        """Before init, the manager must not pretend to route late tools."""
++        mgr = MemoryManager()
++        p = _LateToolsProvider()
++        mgr.add_provider(p)
++
++        assert mgr.has_tool("cortex_recall") is False
++        assert mgr.has_tool("vault_list_notes") is False
++        assert mgr.get_all_tool_names() == set()
++
++    def test_initialize_all_indexes_late_tools(self):
++        """After ``initialize_all`` the dispatch table must know the tools.
++
++        This is the regression: the model was being advertised tools the
++        manager wouldn't dispatch, producing ``Unknown tool: cortex_recall``.
++        """
++        mgr = MemoryManager()
++        p = _LateToolsProvider()
++        mgr.add_provider(p)
++
++        mgr.initialize_all(session_id="s-1", hermes_home="/tmp")
++
++        assert mgr.has_tool("cortex_recall") is True
++        assert mgr.has_tool("cortex_remember") is True
++        assert mgr.has_tool("vault_list_notes") is True
++        assert mgr.get_all_tool_names() == {
++            "cortex_recall",
++            "cortex_remember",
++            "vault_list_notes",
++        }
++
++    def test_initialize_all_routes_to_correct_provider(self):
++        """Routing must land on the late-bound provider, not the stable one."""
++        mgr = MemoryManager()
++        stable = _StableToolsProvider("builtin")
++        late = _LateToolsProvider("hangarx-memory")
++        mgr.add_provider(stable)
++        mgr.add_provider(late)
++
++        mgr.initialize_all(session_id="s-2", hermes_home="/tmp")
++
++        result = mgr.handle_tool_call("cortex_recall", {"query": "ping"})
++        parsed = json.loads(result)
++        assert parsed == {"ok": True, "tool": "cortex_recall"}
++        assert late.handled == [("cortex_recall", {"query": "ping"})]
++
++    def test_initialize_all_is_idempotent(self):
++        """Calling initialize_all twice must not duplicate or drop routes."""
++        mgr = MemoryManager()
++        p = _LateToolsProvider()
++        mgr.add_provider(p)
++
++        mgr.initialize_all(session_id="s-3", hermes_home="/tmp")
++        first_snapshot = set(mgr.get_all_tool_names())
++
++        mgr.initialize_all(session_id="s-3-again", hermes_home="/tmp")
++        second_snapshot = set(mgr.get_all_tool_names())
++
++        assert first_snapshot == second_snapshot
++        assert "cortex_recall" in second_snapshot
++
++    def test_initialize_failure_does_not_break_indexing(self):
++        """If one provider's initialize() raises, others still get indexed."""
++
++        class BrokenInit(_LateToolsProvider):
++            def initialize(self, session_id: str, **kwargs) -> None:
++                raise RuntimeError("boom")
++
++        mgr = MemoryManager()
++        broken = BrokenInit("broken")
++        good = _LateToolsProvider("good")
++        # ``broken`` is registered as the single external; ``good`` becomes
++        # builtin so we don't hit the "one external" guard.
++        good._name = "builtin"
++        mgr.add_provider(good)
++        mgr.add_provider(broken)
++
++        mgr.initialize_all(session_id="s-4", hermes_home="/tmp")
++
++        # The good provider initialized normally and its tools are routable.
++        assert mgr.has_tool("cortex_recall") is True
++        # The broken provider's would-be tools are NOT in the table because
++        # its initialize() raised before its schemas could materialize.
++        for schema in BrokenInit.POST_INIT_TOOLS:
++            provider = mgr._tool_to_provider.get(schema["name"])
++            # If anything routes that name, it must be the good provider.
++            assert provider is None or provider is good
++
++    def test_add_provider_with_pre_known_tools_still_works(self):
++        """Providers whose schemas are visible at add time keep working."""
++        mgr = MemoryManager()
++        p = _StableToolsProvider("builtin")
++        mgr.add_provider(p)
++        assert mgr.has_tool("memory_search") is True
++
++
++if __name__ == "__main__":  # pragma: no cover
++    pytest.main([__file__, "-v"])
