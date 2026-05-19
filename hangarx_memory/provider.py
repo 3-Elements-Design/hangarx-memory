@@ -23,6 +23,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import sensitivity as _sensitivity
+from .changelog import MemoryChangelog, extract_memory_id
 from .client import CortexClient, CortexError, probe_health
 
 try:  # vault.py is a plain module; this import works whether we're
@@ -111,6 +113,32 @@ CONFIG_FILE_NAME = "hangarx-memory.json"
 DEFAULT_BASE_URL = "https://cortex.hangarx.ai"
 DEFAULT_AGENT_ID = "hermes"
 
+
+def _slugify_workspace(value: str) -> str:
+    """Normalize an identity/workspace label to a safe ``workspace_id`` segment.
+
+    The template ``hermes-{identity}`` expands to things like
+    ``hermes-coder``, ``hermes-research``, ``hermes-personal``. Cortex
+    accepts arbitrary strings as workspace ids but we conservatively
+    lower-case, replace whitespace with hyphens, and drop characters
+    outside ``[a-z0-9._-]`` so the id stays stable and url-safe across
+    contexts (env, config files, headers, vault paths).
+    """
+    if not value:
+        return ""
+    out: list[str] = []
+    for char in value.strip().lower():
+        if char.isalnum() or char in "-._":
+            out.append(char)
+        elif char in " \t/\\:":
+            out.append("-")
+        # everything else is dropped
+    slug = "".join(out)
+    # collapse runs of "-" so "hermes--coder" doesn't happen.
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-")
+
 # Hermes' memory.{action,target} -> Cortex category mapping for the
 # on_memory_write bridge. The mapping is intentionally conservative.
 _MEMORY_CATEGORY = {
@@ -160,6 +188,9 @@ class HangarxMemoryProvider(MemoryProvider):
         self._session_turn_log: list[dict[str, Any]] = []
         # Memory-id → vault path map for #15 wikilink injection.
         self._memory_id_to_vault: dict[str, str] = {}
+        # Memory changelog (v0.5.0) — populated in initialize() once the
+        # vault + agent_id are known.
+        self._changelog: MemoryChangelog | None = None
 
     @property
     def name(self) -> str:
@@ -304,6 +335,41 @@ class HangarxMemoryProvider(MemoryProvider):
             "auto_detect_local": auto_detect_local,
             "local_candidates": local_candidates,
             "local_probe_timeout": local_probe_timeout,
+            # v0.5.0 — audit changelog
+            "changelog_enabled": bool(cfg.get("changelog_enabled", True)),
+            "changelog_buffer_size": int(
+                cfg.get("changelog_buffer_size", 200) or 200
+            ),
+            # #11 — profile-templated workspaces. Empty string disables
+            # the template entirely (e.g. for users on a single shared
+            # workspace who don't want per-profile isolation).
+            "workspace_template": (
+                cfg.get("workspace_template")
+                if cfg.get("workspace_template") is not None
+                else "hermes-{identity}"
+            ),
+            # C — sensitivity tags. ``sensitivity_enabled`` gates the
+            # whole feature; ``sensitivity_auto_detect`` controls
+            # whether we run the regex inferrer on each write.
+            # ``prefetch_in_subagent`` is the explicit opt-in for
+            # letting subagents/cron jobs receive prefetch context.
+            "sensitivity_enabled": bool(
+                cfg.get("sensitivity_enabled", True)
+            ),
+            "sensitivity_auto_detect": bool(
+                cfg.get("sensitivity_auto_detect", True)
+            ),
+            "prefetch_in_subagent": bool(
+                cfg.get("prefetch_in_subagent", False)
+            ),
+            # B — per-response citations. When enabled, the prefetch
+            # context appends a short directive telling the model to
+            # surface a "Based on:" footer with the sources it used.
+            # Default on because the directive is small and the gain
+            # (auditable answers) is large.
+            "response_citations": bool(
+                cfg.get("response_citations", True)
+            ),
         }
 
     # -- Local auto-detect ---------------------------------------------------
@@ -414,6 +480,38 @@ class HangarxMemoryProvider(MemoryProvider):
             or DEFAULT_AGENT_ID
         )
 
+        # #11 Profile-templated workspaces. When the user hasn't pinned a
+        # workspace_id (in config or env) AND Hermes told us which
+        # profile is active, expand the template to a deterministic
+        # workspace id like ``hermes-coder``. This gives each profile
+        # its own clean memory bucket out of the box — no manual
+        # workspace_id editing required for users with multiple profiles.
+        #
+        # Honors:
+        #   {identity}  → agent_identity (profile name, e.g. "coder")
+        #   {workspace} → agent_workspace (label like "hermes", default)
+        #
+        # If the user pinned workspace_id, the template is ignored.
+        # If no identity is available (e.g. running outside Hermes),
+        # the template degrades to the bare prefix and we leave
+        # workspace_id empty rather than guessing.
+        if not self._config.get("workspace_id"):
+            template = self._config.get("workspace_template") or ""
+            if template and kwargs.get("agent_identity"):
+                workspace_label = (
+                    kwargs.get("agent_workspace") or "hermes"
+                )
+                resolved = template.format(
+                    identity=_slugify_workspace(kwargs["agent_identity"]),
+                    workspace=_slugify_workspace(workspace_label),
+                )
+                self._config["workspace_id"] = resolved
+                self._config["workspace_from_template"] = True
+                logger.info(
+                    "hangarx-memory: workspace_id resolved from template → %s",
+                    resolved,
+                )
+
         # Local auto-detect: when no base_url was explicitly configured,
         # probe localhost candidates for a running Cortex stack. If one
         # responds healthy, switch ``base_url`` to it and flip a flag so
@@ -480,6 +578,28 @@ class HangarxMemoryProvider(MemoryProvider):
         else:
             self._vault = None
 
+        # Memory changelog (v0.5.0) — initialize after vault so we can
+        # wire it through. Honors the ``changelog_enabled`` knob; default
+        # on because audit logs are cheap and the model can answer
+        # "what changed recently?" questions without hitting the network.
+        if self._config.get("changelog_enabled", True):
+            try:
+                buffer_size = max(
+                    2, int(self._config.get("changelog_buffer_size", 200))
+                )
+            except (TypeError, ValueError):
+                buffer_size = 200
+            self._changelog = MemoryChangelog(
+                ring_buffer_size=buffer_size,
+                vault=self._vault,
+                sessions_folder=self._config.get(
+                    "vault_sessions_folder"
+                ) or "Hermes Sessions",
+                agent_id=self._agent_id,
+            )
+        else:
+            self._changelog = None
+
     def shutdown(self) -> None:
         self._shutdown_event.set()
         thread = self._sync_thread
@@ -537,6 +657,23 @@ class HangarxMemoryProvider(MemoryProvider):
         if not self._config.get("prefetch_enabled", True):
             return
         if not self._client and not self._vault:
+            return
+
+        # C — sensitivity gate on prefetch. In non-primary contexts
+        # (subagent/cron) we suppress prefetch by default so private
+        # memory doesn't accidentally leak into a child task that the
+        # user may not have intended to see it. Override via the
+        # ``prefetch_in_subagent`` config knob if you genuinely want
+        # subagents to inherit the parent's memory context.
+        if (
+            self._config.get("sensitivity_enabled", True)
+            and _sensitivity.is_non_primary(self._agent_context)
+            and not self._config.get("prefetch_in_subagent", False)
+        ):
+            logger.debug(
+                "hangarx-memory: skipping prefetch in %s context",
+                self._agent_context,
+            )
             return
 
         # Cadence gating — fire Cortex only every Nth turn (vault search is
@@ -626,6 +763,24 @@ class HangarxMemoryProvider(MemoryProvider):
                 citation_block = self._format_citations_block(self._last_citations)
                 if citation_block:
                     merged = merged + "\n\n### Citations\n" + citation_block
+                    # B — per-response citation directive. Tell the model
+                    # to end its reply with a "Based on" footer that
+                    # surfaces the sources it actually used. Combined
+                    # with the citation block above, this gives the
+                    # Perplexity-style auditable response.
+                    if self._config.get("response_citations", True):
+                        merged = (
+                            merged
+                            + "\n\n### Response style\n"
+                            + "When your answer draws on the Citations "
+                            + "above, end the reply with a short "
+                            + "\"**Based on:**\" footer listing the "
+                            + "specific sources you used (as "
+                            + "`[[wikilinks]]` for vault notes or "
+                            + "`memory:<id>` for Cortex items). Skip the "
+                            + "footer if none of the citations were "
+                            + "actually relevant."
+                        )
             if merged:
                 with self._prefetch_lock:
                     self._prefetch_cache = merged
@@ -732,14 +887,54 @@ class HangarxMemoryProvider(MemoryProvider):
         meta.setdefault("platform", self._platform)
         meta.setdefault("action", action)
         meta.setdefault("target", target)
+
+        # Sensitivity gate (C). Combine an explicit caller tag (in
+        # metadata.sensitivity) with auto-inferred level — the more
+        # restrictive wins so an API key in 'public' content still
+        # ends up marked SECRET. Then refuse the write entirely if
+        # we're in a non-primary context (subagent/cron) and the
+        # level is restricted.
+        if self._config.get("sensitivity_enabled", True):
+            explicit_level = _sensitivity.extract(meta)
+            inferred_level = (
+                _sensitivity.infer(content)
+                if self._config.get("sensitivity_auto_detect", True)
+                else _sensitivity.SENSITIVITY_PUBLIC
+            )
+            level = _sensitivity.merge(explicit_level, inferred_level)
+            meta["sensitivity"] = level
+            if not _sensitivity.allow_write(level, self._agent_context):
+                logger.info(
+                    "hangarx-memory: refusing %s memory write from %s context",
+                    level, self._agent_context,
+                )
+                if self._changelog is not None:
+                    self._changelog.record(
+                        "BLOCKED",
+                        summary=(
+                            f"refused {level} write from "
+                            f"{self._agent_context} context"
+                        ),
+                        category=category,
+                        session_id=self._session_id,
+                        source="on_memory_write",
+                        details={
+                            "agent_context": self._agent_context,
+                            "sensitivity": level,
+                            "target": target,
+                        },
+                    )
+                return
+        new_memory_id = ""
         if self._client:
             try:
-                self._client.remember(
+                response = self._client.remember(
                     content,
                     agent_id=self._agent_id,
                     category=category,
                     metadata=meta,
                 )
+                new_memory_id = extract_memory_id(response)
             except CortexError as exc:
                 logger.warning("hangarx-memory: on_memory_write failed: %s", exc)
         if self._vault:
@@ -747,6 +942,25 @@ class HangarxMemoryProvider(MemoryProvider):
                 self._append_vault_memory_entry(action, target, content, category, meta)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("hangarx-memory: vault on_memory_write failed: %s", exc)
+        # Audit: log every write to the changelog. Maps Hermes' write
+        # actions to changelog verbs — ``add``/``replace`` become ADDED,
+        # ``remove`` becomes FORGOT (the user-visible effect of removing
+        # a memory entry from the index).
+        if self._changelog is not None:
+            verb = "FORGOT" if action == "remove" else "ADDED"
+            self._changelog.record(
+                verb,
+                summary=content,
+                memory_id=new_memory_id,
+                category=category,
+                session_id=self._session_id,
+                source="on_memory_write",
+                details={
+                    "target": target,
+                    "hermes_action": action,
+                    "sensitivity": meta.get("sensitivity", "public"),
+                },
+            )
 
     # -- on_pre_compress -----------------------------------------------------
 
@@ -792,7 +1006,7 @@ class HangarxMemoryProvider(MemoryProvider):
         # trigger reflection. Both are non-fatal.
         if self._client and self._config.get("auto_promote_enabled", True):
             try:
-                self._client.auto_promote(
+                ap_response = self._client.auto_promote(
                     agent_id=self._agent_id,
                     limit=int(self._config.get("auto_promote_limit", 25) or 25),
                 )
@@ -800,6 +1014,33 @@ class HangarxMemoryProvider(MemoryProvider):
                 logger.debug("hangarx-memory: auto_promote failed: %s", exc)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("hangarx-memory: auto_promote unexpected: %s", exc)
+            else:
+                # Audit: how many memories did auto-promote create / merge?
+                # Cortex's response shape:
+                # {success, data: {promoted: int, merged: int, ...}}
+                if self._changelog is not None:
+                    data = ap_response.get("data", ap_response) \
+                        if isinstance(ap_response, dict) else {}
+                    if isinstance(data, dict):
+                        promoted = data.get("promoted") or data.get(
+                            "promotedCount"
+                        ) or 0
+                        if promoted:
+                            self._changelog.record(
+                                "PROMOTED",
+                                summary=(
+                                    f"auto-promote distilled {promoted} memories"
+                                ),
+                                category="auto_promote",
+                                session_id=self._session_id,
+                                source="on_session_end",
+                                details={
+                                    "promoted_count": promoted,
+                                    "raw_response_keys": sorted(
+                                        k for k in data
+                                    )[:10],
+                                },
+                            )
         if self._client:
             try:
                 self._client.reflect(agent_id=self._agent_id)
@@ -828,6 +1069,7 @@ class HangarxMemoryProvider(MemoryProvider):
                     cortex_schemas
                     + self._cortex_dedup_tool_schemas()
                     + self._cortex_introspection_tool_schemas()
+                    + self._cortex_audit_tool_schemas()
                 )
             schemas.extend(cortex_schemas)
         if self._vault:
@@ -1009,6 +1251,70 @@ class HangarxMemoryProvider(MemoryProvider):
                             "default": 10,
                         },
                     },
+                },
+            },
+        ]
+
+    def _cortex_audit_tool_schemas(self) -> list[dict[str, Any]]:
+        """Tools for the v0.5.0 audit story: changelog + revert.
+
+        - ``cortex_memory_changelog`` reads from the in-process ring
+          buffer so the model can answer "what changed recently?"
+          without hitting Cortex's network path.
+        - ``cortex_revert_memory`` wraps ``DELETE /v1/memory/forget/<id>``
+          and emits a REVERTED entry to the changelog.
+        """
+        return [
+            {
+                "name": "cortex_memory_changelog",
+                "description": (
+                    "Return the most recent memory mutations (additions, "
+                    "merges, forgets, auto-promotions, reverts). Use this "
+                    "when the user asks \"what changed recently?\" or "
+                    "\"why do you remember X?\" — the entries link memory "
+                    "ids to the action that created or removed them. "
+                    "Entries are also persisted to "
+                    "$VAULT/<sessions>/Memory Changelog.md for offline "
+                    "audit."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max entries to return (newest-first).",
+                            "default": 50,
+                        },
+                    },
+                },
+            },
+            {
+                "name": "cortex_revert_memory",
+                "description": (
+                    "Forget (tombstone) a single memory item by id and "
+                    "log the revert to the changelog. Use this when the "
+                    "user says \"forget that\" or corrects a fact you "
+                    "previously stored. The memory id comes from "
+                    "cortex_recall / cortex_memory_items / "
+                    "cortex_memory_changelog responses."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {
+                            "type": "string",
+                            "description": "The memory item id to forget.",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "Optional human-readable note about why this "
+                                "memory is being reverted. Recorded in the "
+                                "changelog for future audit."
+                            ),
+                        },
+                    },
+                    "required": ["memory_id"],
                 },
             },
         ]
@@ -1258,6 +1564,22 @@ class HangarxMemoryProvider(MemoryProvider):
                         "workspaceId": self._client.workspace_id or None,
                     },
                 )
+                if self._changelog is not None:
+                    self._changelog.record(
+                        "MERGED",
+                        summary=(
+                            f"entities {args.get('source_id', '?')} → "
+                            f"{args.get('target_id', '?')}"
+                        ),
+                        memory_id=str(args.get("target_id") or ""),
+                        category="entity_merge",
+                        session_id=self._session_id,
+                        source="cortex_merge_entities",
+                        details={
+                            "target_id": args.get("target_id"),
+                            "source_id": args.get("source_id"),
+                        },
+                    )
             elif tool_name == "cortex_rate_memory":
                 result = self._client.feedback(
                     args["memory_id"],
@@ -1299,6 +1621,53 @@ class HangarxMemoryProvider(MemoryProvider):
                     agent_id=args.get("agent_id") or self._agent_id,
                     sample_size=args.get("sample_size") or 10,
                 )
+            elif tool_name == "cortex_memory_changelog":
+                if self._changelog is None:
+                    result = {
+                        "error": "changelog disabled (set changelog_enabled: true)",
+                        "entries": [],
+                    }
+                else:
+                    entries = self._changelog.recent(
+                        limit=args.get("limit") or 50
+                    )
+                    result = {
+                        "count": len(entries),
+                        "buffer_size": len(self._changelog),
+                        "vault_path": (
+                            self._changelog.vault_path if self._vault else None
+                        ),
+                        "entries": entries,
+                    }
+            elif tool_name == "cortex_revert_memory":
+                memory_id = str(args.get("memory_id") or "").strip()
+                if not memory_id:
+                    return json.dumps(
+                        {"error": "cortex_revert_memory requires memory_id"}
+                    )
+                # Run the actual forget first — if Cortex rejects (e.g.
+                # already tombstoned), surface the error and DON'T log a
+                # misleading "REVERTED" entry to the changelog.
+                forget_result = self._client.forget(
+                    memory_id, agent_id=self._agent_id
+                )
+                reason = (args.get("reason") or "").strip()
+                if self._changelog is not None:
+                    self._changelog.record(
+                        "REVERTED",
+                        summary=reason or f"reverted memory {memory_id}",
+                        memory_id=memory_id,
+                        category="user_revert",
+                        session_id=self._session_id,
+                        source="cortex_revert_memory",
+                        details={"reason": reason} if reason else None,
+                    )
+                result = {
+                    "reverted": True,
+                    "memory_id": memory_id,
+                    "reason": reason or None,
+                    "cortex_response": forget_result,
+                }
             else:
                 return json.dumps({"error": f"unknown tool: {tool_name}"})
         except CortexError as exc:

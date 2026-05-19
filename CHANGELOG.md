@@ -4,6 +4,93 @@ All notable changes to `hangarx-memory` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-05-19
+
+The "audit + isolation" release. Three category-defining features land
+together: a memory changelog the user can read and revert from,
+per-profile workspace isolation so the coder profile stops polluting
+the journaling profile, and sensitivity-aware writes that refuse to
+leak secrets into subagents or cron jobs.
+
+### Added — D. Memory changelog + revert
+
+- **`MemoryChangelog`** in `hangarx_memory/changelog.py` — an
+  append-only audit log of every memory mutation. Bounded ring buffer
+  (default 200 entries) plus a vault sink at
+  `$VAULT/<sessions>/Memory Changelog.md` so the user can read it in
+  Obsidian, search it, or grep it.
+- **Five entry kinds** automatically recorded: `ADDED`, `MERGED`,
+  `FORGOT`, `PROMOTED`, `REVERTED`, plus `BLOCKED` for refused writes.
+- **`cortex_memory_changelog(limit)`** tool — model answers "what
+  changed recently?" / "why do you remember X?" without a network hop.
+- **`cortex_revert_memory(memory_id, reason)`** tool — wraps
+  `DELETE /v1/memory/forget/<id>` and emits a `REVERTED` audit entry.
+- **`CortexClient.forget()`** + `extract_memory_id()` helper for
+  pulling ids out of every Cortex response shape.
+- Wired into `on_memory_write`, the merge tool path, `auto_promote`
+  in `on_session_end`, and the revert tool.
+- **Config**: `changelog_enabled` (default `true`),
+  `changelog_buffer_size` (default `200`).
+
+### Added — #11. Profile-templated workspaces
+
+When Hermes activates the provider with `agent_identity` (the active
+profile name), derive a deterministic `workspace_id` so each profile
+gets its own clean Cortex memory bucket out of the box. No more cross-
+profile memory contamination between e.g. a `coder` and `journaling`
+profile.
+
+- **`_slugify_workspace`** normalizes identity labels to safe ids
+  (`My Research Profile` → `my-research-profile`).
+- **Default template**: `hermes-{identity}`. Honors `{workspace}` too
+  for users who want `<workspace>-<identity>` patterns.
+- **Explicit `workspace_id`** in config or `CORTEX_WORKSPACE_ID` env
+  always wins — the template only fires when nothing is pinned.
+- **Empty template** (`workspace_template: ""`) disables the feature
+  for users on a single shared workspace.
+- **Config**: `workspace_template` (default `"hermes-{identity}"`).
+
+### Added — C. Sensitivity tags + agent-context-aware gate
+
+Three sensitivity levels (`public` / `private` / `secret`) tag every
+stored memory. Writes from non-primary contexts (`subagent`, `cron`,
+`background`) refuse to store `private` or `secret` data, and
+prefetch is suppressed entirely in those contexts by default.
+
+- **`hangarx_memory/sensitivity.py`** — regex-based auto-detection of
+  API keys (OpenAI, Anthropic, AWS, GitHub, GitLab, Slack, Cortex),
+  JWTs, emails, US phone numbers, and SSN-shaped strings.
+- **Explicit tag** wins over inference via the `sensitivity` key in
+  metadata; the more restrictive of (explicit, inferred) is recorded.
+- **Write gate** in `on_memory_write` — refuses restricted writes
+  from non-primary contexts and logs `BLOCKED` to the changelog.
+- **Prefetch gate** in `queue_prefetch` — suppresses prefetch
+  entirely in non-primary contexts. Override via
+  `prefetch_in_subagent: true` if you genuinely want subagents to
+  inherit the parent's memory context.
+- **Config**: `sensitivity_enabled` (default `true`),
+  `sensitivity_auto_detect` (default `true`),
+  `prefetch_in_subagent` (default `false`).
+
+### Added — B. Per-response citations (Perplexity-style)
+
+When the prefetch context contains Cortex citations, append a short
+`### Response style` directive instructing the model to end its reply
+with a `**Based on:**` footer listing the specific sources it used
+(as `[[wikilinks]]` for vault notes, `memory:<id>` for Cortex items).
+
+- **Shipped as a soft prompt in the prefetch context** — no Hermes
+  hook required. Combined with the existing `### Citations` block,
+  this gives the Perplexity-style auditable response pattern.
+- **Config**: `response_citations` (default `true`).
+
+### Engineering
+
+- **96 new tests** across `tests/test_changelog.py` (32),
+  `tests/test_workspace_templates.py` (21), `tests/test_sensitivity.py`
+  (39), and `tests/test_response_citations.py` (4). Total suite now
+  **168 passing**, ruff clean.
+
 ## [0.4.1] — 2026-05-19
 
 ### Added — local Cortex auto-detection
