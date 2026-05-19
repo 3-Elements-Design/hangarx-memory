@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .client import CortexClient, CortexError
+from .client import CortexClient, CortexError, probe_health
 
 try:  # vault.py is a plain module; this import works whether we're
     # loaded as a package (Hermes plugin path) or as a relative module.
@@ -181,11 +181,15 @@ class HangarxMemoryProvider(MemoryProvider):
                     )
 
         api_key = os.environ.get("CORTEX_API_KEY") or cfg.get("api_key", "")
-        base_url = (
+        # ``base_url`` distinguishes "explicit" from "default" so the
+        # auto-detect path in initialize() can probe localhost only when
+        # the user didn't pin a URL themselves.
+        explicit_base_url = (
             os.environ.get("CORTEX_API_URL")
             or cfg.get("base_url")
-            or DEFAULT_BASE_URL
+            or ""
         )
+        base_url = explicit_base_url or DEFAULT_BASE_URL
         workspace_id = (
             os.environ.get("CORTEX_WORKSPACE_ID")
             or cfg.get("workspace_id")
@@ -243,9 +247,36 @@ class HangarxMemoryProvider(MemoryProvider):
         session_summary_enabled = bool(cfg.get("session_summary_enabled", True))
         citation_wikilinks = bool(cfg.get("citation_wikilinks", True))
 
+        # Local auto-detect (v0.4.1): when no base_url is explicitly
+        # configured, probe a small list of candidate URLs for a local
+        # Cortex stack. Skipped when the user pinned a URL or set
+        # CORTEX_API_URL. Honours CORTEX_LOCAL_URLS env (comma-separated)
+        # for non-default ports.
+        auto_detect_local = bool(cfg.get("auto_detect_local", True))
+        local_candidates_raw = (
+            os.environ.get("CORTEX_LOCAL_URLS")
+            or cfg.get("local_candidates")
+            or "http://localhost:3400,http://localhost:4000"
+        )
+        if isinstance(local_candidates_raw, str):
+            local_candidates = [
+                u.strip() for u in local_candidates_raw.split(",") if u.strip()
+            ]
+        elif isinstance(local_candidates_raw, list):
+            local_candidates = [str(u).strip() for u in local_candidates_raw if u]
+        else:
+            local_candidates = []
+        try:
+            local_probe_timeout = max(
+                0.05, float(cfg.get("local_probe_timeout", 0.5))
+            )
+        except (TypeError, ValueError):
+            local_probe_timeout = 0.5
+
         return {
             "api_key": api_key,
             "base_url": base_url,
+            "explicit_base_url": bool(explicit_base_url),
             "workspace_id": workspace_id,
             "organization_id": organization_id,
             "auth_mode": auth_mode,
@@ -270,7 +301,39 @@ class HangarxMemoryProvider(MemoryProvider):
             "dialectic_passes": dialectic_passes,
             "session_summary_enabled": session_summary_enabled,
             "citation_wikilinks": citation_wikilinks,
+            "auto_detect_local": auto_detect_local,
+            "local_candidates": local_candidates,
+            "local_probe_timeout": local_probe_timeout,
         }
+
+    # -- Local auto-detect ---------------------------------------------------
+
+    def _detect_local_cortex(self) -> Optional[str]:
+        """Probe configured candidate URLs for a running Cortex ``/health``.
+
+        Returns the first URL that responds healthy (``ready: true``),
+        or ``None`` if none answer. Each probe uses ``local_probe_timeout``
+        (default 0.5s) so the total auto-detect cost is bounded — with
+        two candidates and a 0.5s timeout, worst case is ~1s before
+        the agent loop continues without Cortex.
+
+        Override the candidate list via:
+          * config: ``"local_candidates": ["http://localhost:3400", ...]``
+          * env: ``CORTEX_LOCAL_URLS="http://localhost:3400,http://..."``
+        """
+        candidates = self._config.get("local_candidates") or []
+        timeout = float(self._config.get("local_probe_timeout") or 0.5)
+        for url in candidates:
+            data = probe_health(url, timeout=timeout)
+            if not data:
+                continue
+            # Cortex's /health returns status="healthy" + ready=true when
+            # FalkorDB + Postgres are both up. Accept either signal so a
+            # partially-degraded stack still gets used (recall might be
+            # slow but the alternative is no memory at all).
+            if data.get("ready") is True or data.get("status") == "healthy":
+                return url
+        return None
 
     # -- Availability --------------------------------------------------------
 
@@ -279,7 +342,8 @@ class HangarxMemoryProvider(MemoryProvider):
 
         Hermes calls this without first calling ``initialize``, so we peek
         at config + env directly. A configured vault alone is enough to
-        run the provider in "local Obsidian only" mode.
+        run the provider in "local Obsidian only" mode. A reachable local
+        Cortex stack is enough to run in "local keyless" mode.
         """
         if self._available_cache is not None:
             return self._available_cache
@@ -293,15 +357,44 @@ class HangarxMemoryProvider(MemoryProvider):
 
         home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
         path = Path(home) / CONFIG_FILE_NAME
+        cfg_data: Dict[str, Any] = {}
         if path.is_file():
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                self._available_cache = bool(
-                    data.get("api_key") or data.get("vault_path")
-                )
-                return self._available_cache
+                cfg_data = json.loads(path.read_text(encoding="utf-8"))
+                if cfg_data.get("api_key") or cfg_data.get("vault_path"):
+                    self._available_cache = True
+                    return True
             except Exception:
-                pass
+                cfg_data = {}
+
+        # Final check: probe local candidates. This is slightly more
+        # expensive (~500ms per candidate) so do it last. Honors the
+        # ``auto_detect_local`` knob — when disabled in config, skip it.
+        if cfg_data.get("auto_detect_local", True):
+            candidates_raw = (
+                os.environ.get("CORTEX_LOCAL_URLS")
+                or cfg_data.get("local_candidates")
+                or "http://localhost:3400,http://localhost:4000"
+            )
+            if isinstance(candidates_raw, str):
+                candidates = [u.strip() for u in candidates_raw.split(",") if u.strip()]
+            elif isinstance(candidates_raw, list):
+                candidates = [str(u).strip() for u in candidates_raw if u]
+            else:
+                candidates = []
+            try:
+                probe_timeout = max(
+                    0.05, float(cfg_data.get("local_probe_timeout", 0.5))
+                )
+            except (TypeError, ValueError):
+                probe_timeout = 0.5
+            for url in candidates:
+                data = probe_health(url, timeout=probe_timeout)
+                if data and (
+                    data.get("ready") is True or data.get("status") == "healthy"
+                ):
+                    self._available_cache = True
+                    return True
 
         self._available_cache = False
         return False
@@ -320,8 +413,32 @@ class HangarxMemoryProvider(MemoryProvider):
             or self._config.get("agent_id")
             or DEFAULT_AGENT_ID
         )
-        if not self._config.get("api_key"):
-            logger.info("hangarx-memory: no API key configured; Cortex client inactive")
+
+        # Local auto-detect: when no base_url was explicitly configured,
+        # probe localhost candidates for a running Cortex stack. If one
+        # responds healthy, switch ``base_url`` to it and flip a flag so
+        # downstream code knows we're in keyless local mode (cortex-api's
+        # AUTH_OPTIONAL_FOR_LOCAL pattern accepts requests without an
+        # API key when the stack is running on localhost).
+        self._local_mode = False
+        if (
+            self._config.get("auto_detect_local")
+            and not self._config.get("explicit_base_url")
+        ):
+            detected = self._detect_local_cortex()
+            if detected:
+                self._config["base_url"] = detected
+                self._local_mode = True
+                logger.info(
+                    "hangarx-memory: auto-detected local Cortex at %s", detected
+                )
+
+        # Cortex client construction. We need either an api_key OR a
+        # confirmed local stack (which serves without auth in dev mode).
+        if not self._config.get("api_key") and not self._local_mode:
+            logger.info(
+                "hangarx-memory: no API key + no local Cortex; client inactive"
+            )
             self._client = None
         else:
             try:

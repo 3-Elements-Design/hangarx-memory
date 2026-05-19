@@ -98,8 +98,9 @@ def _load_config_file() -> Dict[str, Any]:
 
 def _cmd_status(_args: argparse.Namespace) -> int:
     cfg = _load_config_file()
-    has_key = bool(os.environ.get("CORTEX_API_KEY"))
-    base_url = cfg.get("base_url") or "https://cortex.hangarx.ai"
+    has_key = bool(os.environ.get("CORTEX_API_KEY") or cfg.get("api_key"))
+    explicit_url = bool(os.environ.get("CORTEX_API_URL") or cfg.get("base_url"))
+    base_url = cfg.get("base_url") or os.environ.get("CORTEX_API_URL") or "https://cortex.hangarx.ai"
     workspace = cfg.get("workspace_id") or "(not set)"
     organization = cfg.get("organization_id") or "(not set)"
     auth_mode = cfg.get("auth_mode") or "bearer"
@@ -110,11 +111,51 @@ def _cmd_status(_args: argparse.Namespace) -> int:
         or "(not set)"
     )
 
+    # Local auto-detect probe — reuses the same logic as the provider.
+    auto_detect = bool(cfg.get("auto_detect_local", True))
+    detected_url: Optional[str] = None
+    if auto_detect and not explicit_url:
+        from .client import probe_health  # local import to keep CLI light
+
+        candidates_raw = (
+            os.environ.get("CORTEX_LOCAL_URLS")
+            or cfg.get("local_candidates")
+            or "http://localhost:3400,http://localhost:4000"
+        )
+        if isinstance(candidates_raw, str):
+            candidates = [u.strip() for u in candidates_raw.split(",") if u.strip()]
+        elif isinstance(candidates_raw, list):
+            candidates = [str(u).strip() for u in candidates_raw if u]
+        else:
+            candidates = []
+        for url in candidates:
+            data = probe_health(url, timeout=0.3)
+            if data and (data.get("ready") is True or data.get("status") == "healthy"):
+                detected_url = url
+                break
+
+    effective_url = detected_url or base_url
+    mode = (
+        "local-keyless" if detected_url and not has_key
+        else "local-with-key" if detected_url and has_key
+        else "remote" if has_key
+        else "vault-only" if vault_path != "(not set)"
+        else "inactive"
+    )
+
     cfg_path = _config_path()
     print("hangarx-memory status")
     print(f"  config file       : {cfg_path}{'' if cfg_path.is_file() else '  (missing)'}")
-    print(f"  CORTEX_API_KEY    : {'set' if has_key else 'NOT SET (run: hermes memory setup)'}")
-    print(f"  base_url          : {base_url}")
+    print(f"  mode              : {mode}")
+    print(f"  CORTEX_API_KEY    : {'set' if has_key else 'NOT SET'}")
+    print(f"  base_url (config) : {base_url}")
+    if detected_url and detected_url != base_url:
+        print(f"  base_url (active) : {detected_url}  (auto-detected)")
+    elif detected_url:
+        print(f"  local detect      : healthy at {detected_url}")
+    elif auto_detect and not explicit_url:
+        print(f"  local detect      : no local Cortex on default ports")
+    print(f"  effective base    : {effective_url}")
     print(f"  workspace_id      : {workspace}")
     print(f"  organization_id   : {organization}")
     print(f"  auth_mode         : {auth_mode}")

@@ -16,6 +16,50 @@ class CortexError(RuntimeError):
     """Raised when Cortex returns an HTTP or JSON-RPC error."""
 
 
+def probe_health(base_url: str, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+    """Hit the unauthenticated ``/health`` endpoint with a tight timeout.
+
+    Returns the decoded ``data`` payload on success, ``None`` on any
+    failure (connection refused, timeout, non-2xx, malformed JSON).
+    Designed for cheap auto-detection of a local Cortex instance — keep
+    the timeout small so agent startup never visibly stalls.
+
+    Default 0.5s covers realistic local-stack latency (Cortex's /health
+    probes FalkorDB + Postgres internally and can take 200–300ms even on
+    localhost). Adjust via the provider's ``local_probe_timeout`` knob
+    if your stack is faster or slower.
+
+    The Cortex API serves this endpoint at both ``/health`` and
+    ``/v1/health``; we use the root path because it's unauthenticated
+    and shorter.
+    """
+    if not base_url:
+        return None
+    url = base_url.rstrip("/") + "/health"
+    req = urllib_request.Request(url, method="GET")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            if response.status != 200:
+                return None
+            raw = response.read()
+    except Exception:
+        return None
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    # Cortex wraps everything in ``{success: bool, data: {...}}``.
+    if payload.get("success") is False:
+        return None
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
 class CortexClient:
     """HTTP/JSON-RPC client for Cortex REST and MCP endpoints."""
 
