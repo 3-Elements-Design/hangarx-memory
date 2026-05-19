@@ -279,6 +279,24 @@ class CortexClient:
             "GET", f"/v1/memory/categories/{category_id}" + _querystring(params)
         )
 
+    def forget(self, item_id: str, **kwargs: Any) -> Any:
+        """Tombstone a single memory item.
+
+        Wraps ``DELETE /v1/memory/forget/:itemId``. Cortex never hard-
+        deletes — the audit trail is preserved as a tombstone event so
+        downstream consumers (audit log, replay tools) keep working.
+        Returns the JSON envelope ``{"success": True}`` or an error.
+        """
+        if not item_id:
+            raise CortexError("forget requires a non-empty item_id")
+        params = _compact({
+            "workspaceId": kwargs.get("workspace_id") or self.workspace_id or None,
+            "agentId": kwargs.get("agent_id") or None,
+        })
+        return self.request(
+            "DELETE", f"/v1/memory/forget/{item_id}" + _querystring(params)
+        )
+
     def feedback(self, memory_id: str, helpful: bool, **kwargs: Any) -> Any:
         """Rate a memory/result as helpful or not.
 
