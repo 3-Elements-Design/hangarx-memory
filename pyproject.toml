@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hangarx-memory"
+version = "0.4.0"
+description = "HangarX Cortex GraphRAG + memU + Obsidian vault memory provider for Hermes Agent."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "HangarX", email = "hello@hangarx.ai" },
+]
+keywords = [
+    "hermes",
+    "hermes-agent",
+    "cortex",
+    "hangarx",
+    "memory",
+    "graphrag",
+    "obsidian",
+    "memu",
+    "agent",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Zero runtime deps — the plugin uses urllib + stdlib only.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://hangarx.ai"
+Documentation = "https://app.hangarx.ai/docs/integrations/hermes-agent"
+Repository = "https://github.com/hangarx/hangarx-memory"
+Issues = "https://github.com/hangarx/hangarx-memory/issues"
+Changelog = "https://github.com/hangarx/hangarx-memory/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+# Include the plugin-root files (plugin.yaml, top-level __init__.py shim,
+# cli.py shim) alongside the hangarx_memory package so a `pip install`
+# can mirror the layout users symlink under $HERMES_HOME/plugins/.
+packages = ["hangarx_memory", "hangarx_memory.scripts"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"hangarx_memory" = ["scripts/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]  # line length is handled by formatter

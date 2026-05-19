@@ -1,0 +1,17 @@
+name: hangarx-memory
+version: 0.4.0
+description: "HangarX Cortex GraphRAG + memU + Obsidian vault memory provider for Hermes."
+author: HangarX
+license: MIT
+homepage: https://hangarx.ai
+repository: https://github.com/hangarx/hangarx-memory
+hooks:
+  - prefetch
+  - queue_prefetch
+  - sync_turn
+  - on_memory_write
+  - on_pre_compress
+  - on_session_end
+  - on_session_switch
+  - on_turn_start
+  - system_prompt_block
